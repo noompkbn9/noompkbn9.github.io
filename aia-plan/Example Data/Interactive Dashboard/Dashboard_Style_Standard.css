@@ -1,0 +1,12 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Sarabun:wght@300;400;600;700&display=swap');
+
+* { box-sizing: border-box; }
+body { margin: 0; background-color: #0b1020; color: #e2e8f0; font-family: 'Sarabun', 'Inter', system-ui, sans-serif; }
+
+.header-bg { background: linear-gradient(90deg, #1e3a8a, #0f766e); }
+.card-dark { background-color: #141b34; border: 1px solid #2d3a63; border-radius: 16px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4); }
+.info-card-bg { background-color: #1a233d; border: 1px solid #2e3d6b; }
+.info-box-gray { background-color: #253152; border-radius: 8px; padding: 10px; text-align: center; }
+
+.tab-btn { background-color: #1e293b; color: #94a3b8; border: 1px solid #334155; transition: all 0.2s ease-in-out; }
+.tab-btn.active { background-color: #38bdf8; color: #0f172a; border-color: #38bdf8; font-weight: 700; }
