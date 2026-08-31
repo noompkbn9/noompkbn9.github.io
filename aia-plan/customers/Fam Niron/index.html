@@ -369,10 +369,11 @@ const CASH_IN_CANDIDATES = [
   // carries. It's now shown as descriptive text only in the Benefit Summary's "vitality"
   // band (rate schedule, not a baht total) -- see renderBenefitSummaryC.
   // vitality_extra_bonus REMOVED (2026-08-29, per user, correcting a 2026-08-06 mistake):
-  // the +5% Extra Bonus is a premium-discount-style rate folded into vitality_cashback's
-  // own base rate at build time (see _compute_ul_vitality_cashback in
-  // read_excel_source.py) -- it was never separate real cash, so it gets the exact same
-  // fund-credit/descriptive-only treatment as vitality_cashback above, not its own toggle.
+  // the +5% first-year Extra Bonus is a genuine premium DISCOUNT (reduces real cash paid),
+  // not fund-credited and not separate cash paid on top either. It's written to the
+  // premium_discount field instead (see _compute_ul_vitality_cashback in
+  // read_excel_source.py) -- the same field V80/ALP70/80 already use for their own real
+  // discounts, so no separate candidate/toggle is needed here.
   // 2026-08-28 (dataviz skill audit): was #5FB3B3 -- same chroma-floor failure as
   // cash_coupon above, plus it's the item that actually sits adjacent to
   // premium_discount in a real stack (e.g. V80). Not reused elsewhere in this file.
@@ -742,6 +743,7 @@ const PRODUCT_NAME_MAP = {
   'IFG': 'AIA Infinite Gift Prestige',
   'V70': 'AIA Life Protector (V70)',
   'V80': 'AIA Life Protector (V80)',
+  'LTI99': 'AIA Lifetime Income 9/99 (Par)',
 };
 const IFW_VARIANT_MAP = { 'L': '(แผนส่งต่อมรดก)', 'R': '(แผนรับเงินเกษียณ)' };
 const PREMIUM_TYPE_MAP = { 'RPP': 'RPP', 'RTU': 'RTU', 'ATU': 'ATU' };
@@ -925,6 +927,38 @@ function wireDiscountBandLegendSync(inst) {
   });
 }
 
+// 2026-08-30, per user: when a plan has several milestone callout bubbles close enough
+// together to overlap on the deep-dive chart, hovering one should bring IT to the front.
+// ECharts has no chart-type-specific "bring markPoint to front" API -- the standard idiom
+// (same one used for overlapping graphic elements generally) is bumping that element's
+// own z2 above its siblings' via a targeted setOption patch, then restoring the baseline
+// z2 (10 + its own index, set at build time in buildCreamSeries) on mouseout. z2 governs
+// paint order within the same zlevel; it has nothing to do with z (used for 3D/layer
+// stacking elsewhere in this file) so this can't be confused with those.
+function wireMilestoneCalloutHover(inst) {
+  const resetZ2 = seriesPatchForHoveredIndex(inst, null);
+  inst.on('mouseover', params => {
+    if (params.componentType !== 'markPoint') return;
+    inst.setOption({ series: seriesPatchForHoveredIndex(inst, params.seriesIndex, params.dataIndex) }, { lazyUpdate: true });
+  });
+  inst.on('mouseout', params => {
+    if (params.componentType !== 'markPoint') return;
+    inst.setOption({ series: resetZ2 }, { lazyUpdate: true });
+  });
+}
+function seriesPatchForHoveredIndex(inst, hoveredSeriesIndex, hoveredDataIndex) {
+  const opt = inst.getOption();
+  return opt.series.map((s, i) => {
+    if (!s.markPoint || !s.markPoint.data || !s.markPoint.data.length) return {};
+    const data = s.markPoint.data.map((d, di) => {
+      const isHovered = i === hoveredSeriesIndex && di === hoveredDataIndex;
+      const z2 = isHovered ? 999 : 10 + di;
+      return { ...d, z2, label: { ...d.label, z2 } };
+    });
+    return { markPoint: { data } };
+  });
+}
+
 function axisPointerCross(dark) {
   // crossStyle/lineStyle draw the canvas crosshair itself -- must stay literal colors (not
   // CSS var()), same reasoning as CREAM_CHART_PALETTE above. label is the small floating DOM
@@ -981,6 +1015,11 @@ function axisTooltipFormatter(params, valueFmt, opts) {
 
 const seriesHasData = arr => arr.some(v => v !== null && v !== undefined && Math.abs(v) > 0);
 const isISPPlan = name => (name||'').split('_')[0].split('-')[0] === 'ISP';
+// 2026-08-30, per user: AIA Lifetime Income 9/99 (Par) gets its own brochure-style
+// milestone illustration chart (see milestoneIllustrationChartOption below) instead of
+// the generic CV chart -- matched on the product code prefix used elsewhere for this
+// plan (LTI99), same convention as isISPPlan.
+const isLifetimeIncome99Plan = name => (name||'').split('_')[0].split('-')[0] === 'LTI99';
 // True rendered height of the CV bar -- CV (+ sum_assured for ISP, which stacks in the
 // same group). 2026-08-28, per user: no Net-Cash-In item stacks onto the CV bar anymore
 // (all moved to their own cumulative line-area stack, see buildCreamSeries/cashInStackKey)
@@ -1101,15 +1140,78 @@ function buildCreamSeries(p, pts, opts) {
   if (series.length && p.milestones && p.milestones.length) {
     const ages = pts.map(r => r.age);
     const markLineData = [];
-    p.milestones.forEach(m => {
+    // 2026-08-30, per user: value callout bubbles (same markPoint+styled-label pattern
+    // as milestoneIllustrationChartOption's LTI99 chart) at every existing milestone --
+    // "เวนคืน"/"เสียชีวิต" totals at that milestone's age, not just the dashed line/label
+    // this loop already drew. Generic across every product (uses the plan's own CV/DB
+    // series already computed above, not anything LTI99-specific).
+    //
+    // 2026-08-30, per user: Compare view (compareSetOption, N plans side by side in
+    // narrow grids) does NOT get these bubbles -- too cramped with multiple plans'
+    // milestones competing for the same narrow width, and the plain dashed-line label
+    // read fine there before. Individual/deep-dive view (planChartOption, one wide
+    // chart) DOES get them. `opts.showMilestoneCallouts` is the switch; only
+    // planChartOption's own buildCreamSeries call passes it true.
+    const showCallouts = !!opts.showMilestoneCallouts;
+    const dark = opts.dark;
+    // Vertical clamp companion to the horizontal one below -- a milestone whose value is
+    // near this plan's own CV/DB peak sits close to the grid's top edge, so a 'top'-
+    // positioned box (which grows UPWARD from the point) runs past the canvas top the
+    // same way an edge point runs past the left/right sides. Flips to 'bottom' for those.
+    const localPeak = Math.max(1, ...cv.map(v => v || 0), ...db.map(v => v || 0));
+    const markPointData = [];
+    p.milestones.forEach((m, mi) => {
       const j = ages.indexOf(m.age);
       if (j >= 0) {
         markLineData.push({ xAxis: j,
           lineStyle: { color:'#94867A', type:'dashed', width:1.2 },
-          label: { formatter: `${m.label} (${m.age})`, color:'#6b5f52', fontSize:10, position:'insideEndTop' } });
+          // Original inline label (pre-2026-08-30) only shown where there's no bubble to
+          // duplicate it -- Compare view keeps this exactly as it always looked.
+          label: showCallouts ? { show:false } : { formatter: `${m.label} (${m.age})`, color:'#6b5f52', fontSize:10, position:'insideEndTop' } });
+        if (!showCallouts) return;
+        const cvv = cv[j], dbv = db[j];
+        const lines = [];
+        if (cvv) lines.push(`เวนคืน: ${fmtBaht(cvv)} บาท`);
+        if (dbv) lines.push(`เสียชีวิต: ${fmtBaht(dbv)} บาท`);
+        if (lines.length) {
+          // Edge clamp (2026-08-30, per user: last milestone's bubble was clipped off the
+          // right edge of the chart; also asked to keep the plot area at full size rather
+          // than padding the grid to make room). `align` alone does NOT move the box -- it
+          // only controls how multi-line text aligns WITHIN a box ECharts still centers on
+          // the anchor point -- confirmed the fix needs an actual pixel `offset`, same
+          // mechanism this file's IRR chart out-of-range callout already uses (see its
+          // `offset: [24, 0]`) to nudge a box away from a point sitting at the chart edge,
+          // since a label is clipped to the canvas's own bounds (not the grid rect) and a
+          // ~150px-wide box centered on the last/first x tick otherwise overruns it.
+          const nearRightEdge = j >= pts.length - 2;
+          const nearLeftEdge = j <= 1;
+          const nearTop = Math.max(cvv || 0, dbv || 0) >= localPeak * 0.85;
+          const edgeOffset = nearRightEdge ? [-72, 0] : nearLeftEdge ? [72, 0] : [0, 0];
+          // z2 (2026-08-30, per user: overlapping callouts on the deep-dive chart should
+          // bring whichever one is hovered to the front) -- zrender draws higher-z2
+          // elements over lower-z2 ones within the same zlevel; base z2 is staggered by
+          // milestone order so ties don't repaint in an unstable order, and
+          // wireMilestoneCalloutHover (attached where this chart's instance is created)
+          // temporarily boosts a single hovered item's z2 above every other one, then
+          // restores this same baseline on mouseout -- no chart-type-specific "bring to
+          // front" API exists in ECharts for markPoint; a plain z2 bump on hover is the
+          // standard idiom (same technique the ECharts docs use for overlapping graphic
+          // elements in general).
+          markPointData.push({ coord: [j, Math.max(cvv || 0, dbv || 0)], symbol: 'pin', symbolSize: 22,
+            name: `milestone-${mi}`, z2: 10 + mi,
+            itemStyle: { color: p.color, borderColor: dark ? '#1B2027' : '#FFFFFF', borderWidth: 1.5 },
+            label: { show: true, formatter: `${m.label} (อายุ ${m.age})\n${lines.join('\n')}`, z2: 10 + mi,
+              backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: p.color, borderWidth: 1.5, borderRadius: 6,
+              padding: [5, 8], color: dark ? '#E5E0D8' : '#2B2620', fontSize: 10, fontFamily: 'Prompt', fontWeight: 600,
+              position: nearTop ? 'bottom' : 'top', distance: 16, lineHeight: 14,
+              align: nearRightEdge ? 'right' : nearLeftEdge ? 'left' : 'center', offset: edgeOffset } });
+        }
       }
     });
     if (markLineData.length) series[series.length - 1].markLine = { symbol:'none', silent:true, data: markLineData, ...idxOpt };
+    // silent:false (was true) so hover events actually reach these points -- needed for
+    // wireMilestoneCalloutHover's bring-to-front behavior below.
+    if (markPointData.length) series[series.length - 1].markPoint = { silent: false, data: markPointData, ...idxOpt };
   }
   return series;
 }
@@ -1121,7 +1223,7 @@ function planChartOption(plan, tickMode, dark) {
   const cc = creamChartColors(dark);
   const axisColor = cc.axis;
   const gridColor = cc.grid;
-  const series = buildCreamSeries(plan, pts, {});
+  const series = buildCreamSeries(plan, pts, { dark, showMilestoneCallouts: true });
   const iconMap = {};
   series.forEach(s => {
     if (s.type === 'bar') iconMap[s.name] = { kind:'bar', color: s.itemStyle.color };
@@ -1144,6 +1246,9 @@ function planChartOption(plan, tickMode, dark) {
   pts.forEach(r => { maxV = Math.max(maxV, r.death_benefit_display ?? r.death_benefit ?? 0, (r.cum_premium_display ?? r.cum_premium) || 0, r.cum_fee_total || 0, r.cum_premium_discount || 0, cashInAreaMax(r), cvStackHeight(r, planIspMode)); });
   return {
     backgroundColor: 'transparent',
+    // 2026-08-30, per user: keep the plot area at its original full size (right/top back
+    // to 12/16) rather than shrinking the chart to make room for callout bubbles -- the
+    // edge-clipping fix below (offset) keeps bubbles inside these original bounds instead.
     grid: { left: 50, right: 12, top: 16, bottom: 66 },
     // preserveOrder (2026-08-27, per user): read the tooltip rows top-to-bottom in the same
     // order the chart's series are pushed/stacked, instead of sorted by value descending --
@@ -1156,6 +1261,112 @@ function planChartOption(plan, tickMode, dark) {
     dataZoom: [{ type: 'inside' }],
     xAxis: { type: 'category', data: ax, axisLine: { lineStyle: { color: gridColor } }, axisLabel: { color: axisColor, fontSize: 11 } },
     yAxis: { type: 'value', max: maxV * 1.12, axisLabel: { color: axisColor, fontSize: 10, formatter: v => (v/1e6).toFixed(1)+'M' }, splitLine: { lineStyle: { color: gridColor } } },
+    series,
+  };
+}
+
+// 2026-08-30, per user: brochure-style milestone illustration chart for AIA Lifetime
+// Income 9/99 (Par) -- see Brochure_AIALTI99_9_2026#F1 copy.pdf page 7. Renders a
+// stacked bar PER AGE MILESTONE (not per policy year like the generic CV chart), base
+// segments = cumulative Cash Dividend + cumulative Cash-back paid to date (real cash
+// already received regardless of outcome), topped by ONE terminal-outcome segment.
+//
+// Deliberately DIFFERENT from the brochure's own layout in one respect (confirmed with
+// user after walking through the dividend mechanics): the brochure overlays two
+// mutually-exclusive "what-if" outcomes (เวนคืน vs เสียชีวิต) into a single stacked bar
+// at age 80/98, which reads as "you get both at once" -- exactly the confusion the user
+// hit. Here each mutually-exclusive outcome gets its OWN bar (grouped side-by-side per
+// age, via ECharts' automatic behavior when sibling bar series use different `stack`
+// ids), so "เวนคืน" and "เสียชีวิต" never visually sum into one number.
+//
+// Expects `plan.series` rows (sparse milestone checkpoints) to carry, per row:
+// - age, year (existing, always present)
+// - cum_cash_coupon / cum_dividend_min (existing compute_plan_series output -- fed via
+//   each row's own `cash_coupon`/`dividend_min` DELTA-since-last-checkpoint value, so
+//   the generic cumulative-sum machinery in compute_plan_series (irr_math.py:126-137)
+//   reconstructs the correct running total with no bespoke field needed)
+// - surrender_value (CV), death_benefit (DB) -- existing fields, point-in-time
+// - terminal_dividend_surrender, terminal_dividend_death -- NEW, optional, point-in-time,
+//   non-guaranteed lump amount for that single row's policy year only (omit/null before
+//   policy year 10, per the brochure's own TD-eligibility rule)
+// A row missing surrender_value/death_benefit/terminal_dividend_* entirely means "no
+// terminal-outcome bar for this milestone yet" -- only the base (cashback+dividend) bar
+// is drawn for it (matches the brochure's own early-milestone treatment).
+const LTI99_COLORS = { cashback: '#A23B4C', dividend: '#F0A8C0', cv: '#F2B49A', tdSurrender: '#8886C4', db: '#4A4E85', tdDeath: '#6B4E9E', maturity: '#C9A227' };
+function milestoneIllustrationChartOption(plan, dark) {
+  const cc = creamChartColors(dark);
+  const rows = plan.series; // sparse milestone checkpoints, already sorted by year
+  const lastYear = rows.length ? rows[rows.length - 1].year : null;
+  const ages = rows.map(r => String(r.age));
+  const val = (r, k) => (r[k] === null || r[k] === undefined) ? null : r[k];
+  const surrenderStack = rows.map(r => (r.year === lastYear) ? null : val(r, 'surrender_value'));
+  const tdSurrenderStack = rows.map(r => (r.year === lastYear) ? null : val(r, 'terminal_dividend_surrender'));
+  const deathStack = rows.map(r => (r.year === lastYear) ? null : val(r, 'death_benefit'));
+  const tdDeathStack = rows.map(r => (r.year === lastYear) ? null : val(r, 'terminal_dividend_death'));
+  const maturityStack = rows.map(r => (r.year === lastYear) ? val(r, 'death_benefit') : null);
+  const cashbackBase = rows.map(r => r.cum_cash_coupon || 0);
+  const dividendBase = rows.map(r => r.cum_dividend_min || 0);
+  const bar = (name, data, color, stack) => ({ name, type: 'bar', stack, data, itemStyle: { color }, barMaxWidth: 46, barGap: '20%' });
+  const series = [
+    // Base (already-received cash, common to every outcome) drawn once per stack group
+    // so each grouped bar reads as a complete standalone total, not a partial one.
+    bar('เงินคืนสะสมรายงวด', cashbackBase, LTI99_COLORS.cashback, 'sv'),
+    bar('เงินปันผลสะสมรายงวด', dividendBase, LTI99_COLORS.dividend, 'sv'),
+    bar('มูลค่าเวนคืนกรมธรรม์ (CV)', surrenderStack, LTI99_COLORS.cv, 'sv'),
+    bar('เงินปันผลเมื่อสัญญาสิ้นสุด (เวนคืน)', tdSurrenderStack, LTI99_COLORS.tdSurrender, 'sv'),
+    bar('__cashback_db', cashbackBase, LTI99_COLORS.cashback, 'db'),
+    bar('__dividend_db', dividendBase, LTI99_COLORS.dividend, 'db'),
+    bar('ผลประโยชน์กรณีเสียชีวิต (DB)', deathStack, LTI99_COLORS.db, 'db'),
+    bar('เงินปันผลเมื่อสัญญาสิ้นสุด (เสียชีวิต)', tdDeathStack, LTI99_COLORS.tdDeath, 'db'),
+    bar('__cashback_mat', cashbackBase, LTI99_COLORS.cashback, 'mat'),
+    bar('__dividend_mat', dividendBase, LTI99_COLORS.dividend, 'mat'),
+    bar('เงินครบกำหนดสัญญา', maturityStack, LTI99_COLORS.maturity, 'mat'),
+  ];
+  // Callout bubbles: total per outcome at the last milestone that actually has that
+  // outcome's data (mirrors the brochure's "หากเสียชีวิตตอนอายุ X ปี... Y ล้านบาท" boxes),
+  // reusing the markPoint+styled-label pattern already established elsewhere in this file
+  // (e.g. the IRR chart's value-reading bubbles).
+  const totalAt = (i, stackArrays) => stackArrays.reduce((s, arr) => s + (arr[i] || 0), 0);
+  const markData = [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (surrenderStack[i] !== null) {
+      markData.push({ coord: [i, totalAt(i, [cashbackBase, dividendBase, surrenderStack, tdSurrenderStack])], symbol: 'circle', symbolSize: 6,
+        itemStyle: { color: LTI99_COLORS.tdSurrender },
+        label: { show: true, formatter: `หากเวนคืนตอนอายุ ${ages[i]} ปี\n${fmtBaht(totalAt(i, [cashbackBase, dividendBase, surrenderStack, tdSurrenderStack]))} บาท`,
+          backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: LTI99_COLORS.tdSurrender, borderWidth: 1.5, borderRadius: 6,
+          padding: [6, 9], color: LTI99_COLORS.tdSurrender, fontSize: 10, fontFamily: 'Prompt', fontWeight: 600, position: 'top', distance: 14, lineHeight: 14 } });
+      break;
+    }
+  }
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (i !== rows.length - 1 && deathStack[i] !== null) {
+      markData.push({ coord: [i, totalAt(i, [cashbackBase, dividendBase, deathStack, tdDeathStack])], symbol: 'circle', symbolSize: 6,
+        itemStyle: { color: LTI99_COLORS.tdDeath },
+        label: { show: true, formatter: `หากเสียชีวิตตอนอายุ ${ages[i]} ปี\n${fmtBaht(totalAt(i, [cashbackBase, dividendBase, deathStack, tdDeathStack]))} บาท`,
+          backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: LTI99_COLORS.tdDeath, borderWidth: 1.5, borderRadius: 6,
+          padding: [6, 9], color: LTI99_COLORS.tdDeath, fontSize: 10, fontFamily: 'Prompt', fontWeight: 600, position: 'top', distance: 14, lineHeight: 14 } });
+      break;
+    }
+  }
+  if (rows.length && maturityStack[rows.length - 1] !== null) {
+    const i = rows.length - 1;
+    markData.push({ coord: [i, totalAt(i, [cashbackBase, dividendBase, maturityStack])], symbol: 'circle', symbolSize: 6,
+      itemStyle: { color: LTI99_COLORS.maturity },
+      label: { show: true, formatter: `หากอยู่ครบกำหนดสัญญา\n${fmtBaht(totalAt(i, [cashbackBase, dividendBase, maturityStack]))} บาท`,
+        backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: LTI99_COLORS.maturity, borderWidth: 1.5, borderRadius: 6,
+        padding: [6, 9], color: LTI99_COLORS.maturity, fontSize: 10, fontFamily: 'Prompt', fontWeight: 600, position: 'top', distance: 14, lineHeight: 14 } });
+  }
+  if (markData.length) series.push({ name: '__lti99_callouts', type: 'bar', stack: 'sv', data: rows.map(()=>0), itemStyle: { opacity: 0 }, barWidth: 0, markPoint: { symbol: 'pin', symbolSize: 0, silent: true, data: markData } });
+  const maxV = Math.max(1, ...rows.map((r, i) => totalAt(i, [cashbackBase, dividendBase, surrenderStack, tdSurrenderStack])), ...rows.map((r, i) => totalAt(i, [cashbackBase, dividendBase, deathStack, tdDeathStack])), ...rows.map((r, i) => totalAt(i, [cashbackBase, dividendBase, maturityStack])));
+  const iconMap = {};
+  series.forEach(s => { if (!s.name.startsWith('__')) iconMap[s.name] = { kind: 'bar', color: s.itemStyle.color }; });
+  return {
+    backgroundColor: 'transparent',
+    grid: { left: 60, right: 16, top: 60, bottom: 40 },
+    tooltip: { trigger: 'axis', formatter: p => axisTooltipFormatter(p.filter(x => !x.seriesName.startsWith('__') && x.value), v => fmtBaht(v) + ' บาท', { iconMap, preserveOrder: true }), axisPointer: { type: 'shadow' }, ...tooltipStyle(dark) },
+    legend: { top: 4, textStyle: { color: cc.axis, fontSize: 11, fontFamily: 'Prompt' }, data: [...new Set(series.map(s => s.name))].filter(n => !n.startsWith('__')) },
+    xAxis: { type: 'category', data: ages, name: 'อายุ (ปี)', nameLocation: 'end', nameTextStyle: { color: cc.axis, fontSize: 11 }, axisLine: { lineStyle: { color: cc.grid } }, axisLabel: { color: cc.axis, fontSize: 11 } },
+    yAxis: { type: 'value', max: maxV * 1.25, axisLabel: { color: cc.axis, fontSize: 10, formatter: v => (v/1e6).toFixed(1)+'M' }, splitLine: { lineStyle: { color: cc.grid } } },
     series,
   };
 }
@@ -1211,7 +1422,7 @@ function compareSetOption(container, plans, tickMode, dark) {
   const wrap = (v, planName) => (v === null || v === undefined) ? null : { value: v, planName };
   plansData.forEach((d, i) => {
     const p = d.p, pts = d.pts;
-    const planSeries = buildCreamSeries(p, pts, { gridIdx: i, wrap: v => wrap(v, p.name), cvName: CV_NAME });
+    const planSeries = buildCreamSeries(p, pts, { gridIdx: i, wrap: v => wrap(v, p.name), cvName: CV_NAME, dark });
     planSeries.forEach(s => {
       series.push(s);
       if (s.type === 'bar') icons.push({ kind:'bar', color: s.itemStyle.color });
@@ -2175,12 +2386,11 @@ function renderBenefitSummaryC(c, st, dark, opts) {
     // for this plan still renders its band with one explicit "ไม่มี" placeholder row,
     // never omitted.
     const matrix = p.benefit_category_matrix || { rows: [], missing: [] };
-    // Vitality Unit Linked / general UL bonuses (2026-08-06, per user; extended 2026-08-29
-    // to also cover the Extra Bonus, see _compute_ul_vitality_cashback in
-    // read_excel_source.py): these are fund credits already reflected in
-    // surrender_value/CV -- showing a baht TOTAL on top of CV would double-count the same
-    // money twice. Show them as descriptive rate-schedule / eligibility text instead, no
-    // computed sum.
+    // Vitality Unit Linked / general UL bonuses (2026-08-06, per user): these are fund
+    // credits already reflected in surrender_value/CV -- showing a baht TOTAL on top of CV
+    // would double-count the same money twice. Show them as descriptive rate-schedule /
+    // eligibility text instead, no computed sum. (The +5% first-year Extra Bonus is NOT
+    // part of this -- it's a real premium_discount, see the discountTotal block below.)
     const hasVul = series.some(row => (row.vitality_cashback || 0) > 0);
     // CONFIRMED (noompkbn9, 2026-08-25): premium_discount is real cash-equivalent benefit
     // (a discount AIA effectively funds on the client's behalf) -- not a fund credit already
@@ -2678,6 +2888,12 @@ function render() {
             <div id="indivchart-${idx}" style="width:100%;height:420px;"></div>
           </div>
 
+          ${isLifetimeIncome99Plan(indivPlan.name) ? `
+          <div class="border-t hairline mt-5 pt-5">
+            <div class="text-xs uppercase muted font-semibold tracking-wide mb-3 flex items-center gap-1.5"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>ภาพแสดงผลประโยชน์ตามอายุ (สไตล์โบรชัวร์)</div>
+            <div id="lti99chart-${idx}" style="width:100%;height:440px;"></div>
+          </div>` : ''}
+
           <div class="border-t hairline mt-5 pt-5">
             <div class="text-xs uppercase muted font-semibold tracking-wide mb-3 flex items-center gap-1.5"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/></svg>Benefit Summary</div>
             ${renderBenefitSummaryC(c, st, dark, { plans: [indivPlan], bare: true })}
@@ -2815,7 +3031,16 @@ function render() {
       const inst = echarts.init(indivEl);
       inst.setOption(planChartOption(indivPlan, indivTick, dark));
       wireDiscountBandLegendSync(inst);
+      wireMilestoneCalloutHover(inst);
       echartsInstances.push(inst);
+      if (isLifetimeIncome99Plan(indivPlan.name)) {
+        const lti99El = document.getElementById(`lti99chart-${idx}`);
+        if (lti99El) {
+          const lti99Inst = echarts.init(lti99El);
+          lti99Inst.setOption(milestoneIllustrationChartOption(indivPlan, dark));
+          echartsInstances.push(lti99Inst);
+        }
+      }
       // 2026-08-28, per user: cashflow + IRR used to be two separate echarts instances
       // linked only by echarts.connect() (tooltip/crosshair events, not layout) -- the
       // age axis didn't actually line up pixel-for-pixel between them (confirmed via
