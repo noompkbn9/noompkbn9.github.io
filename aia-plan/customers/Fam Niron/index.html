@@ -1174,19 +1174,42 @@ function buildCreamSeries(p, pts, opts) {
         if (cvv) lines.push(`*เวนคืนเงินสด: ${fmtBaht(cvv)} บาท`);
         if (dbv) lines.push(`มรดกส่งต่อ: ${fmtBaht(dbv)} บาท`);
         if (lines.length) {
-          // Edge clamp (2026-08-30, per user: last milestone's bubble was clipped off the
-          // right edge of the chart; also asked to keep the plot area at full size rather
-          // than padding the grid to make room). `align` alone does NOT move the box -- it
-          // only controls how multi-line text aligns WITHIN a box ECharts still centers on
-          // the anchor point -- confirmed the fix needs an actual pixel `offset`, same
-          // mechanism this file's IRR chart out-of-range callout already uses (see its
-          // `offset: [24, 0]`) to nudge a box away from a point sitting at the chart edge,
-          // since a label is clipped to the canvas's own bounds (not the grid rect) and a
-          // ~150px-wide box centered on the last/first x tick otherwise overruns it.
+          const nearTop = Math.max(cvv || 0, dbv || 0) >= localPeak * 0.85;
+          // 2026-09-02, per user: on an actual phone-width screen (confirmed via a real
+          // canvas-size check -- window.innerWidth 375 produces a chart canvas only
+          // ~211px wide), the callout box itself is ~208px wide -- there's only ~3px of
+          // slack in the ENTIRE canvas. No amount of left/right `offset` nudging can fix
+          // that; the box has to actually get smaller on narrow screens, not just move.
+          // `window.innerWidth` is read here (not the chart's own pixel width, which
+          // isn't known yet at series-build time, before the chart exists) as a simple,
+          // reliable proxy -- correlates with the final canvas width, and avoids every
+          // post-render-patch problem documented below for `offset` (this shrink is
+          // baked into the INITIAL option, same reasoning).
+          const narrowView = (typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth < 500);
+          const calloutFontSize = narrowView ? 8 : 10;
+          const calloutPadding = narrowView ? [4, 6] : [7, 10];
+          const calloutLineHeight = narrowView ? 11 : 14;
+          // Edge clamp -- multiple attempts at this logged and reverted 2026-09-02 (see
+          // git history): `confine: true` doesn't reposition a string `position`;
+          // a `position` FUNCTION is silently ignored for markPoint labels; a
+          // post-render `label.offset` patch via `setOption` shows up in `getOption()`
+          // but is never actually applied to the rendered box (confirmed via zrender
+          // inspection -- ECharts only re-runs markPoint label layout on the INITIAL
+          // render or a full `notMerge` reset, not on an incremental merge patch);
+          // direct zrender node mutation worked but risked corrupting the chart's first
+          // paint. Landed on the original, simplest mechanism -- a fixed pixel `offset`
+          // baked into the markPoint's data at construction time (this is what actually
+          // gets applied, since it's part of the initial option, not a later patch).
+          // Deliberately keeps `align: 'center'` even for edge cases (NOT 'right'/
+          // 'left') -- switching align to 'right' for the near-right-edge case was
+          // tried and made things WORSE (clipped the box's LEFT edge instead, confirmed
+          // via snapshot), apparently compounding with the offset rather than
+          // complementing it. Smaller offset on narrow screens since the box itself is
+          // now much smaller too (doesn't need as big a nudge to clear the edge).
           const nearRightEdge = j >= pts.length - 2;
           const nearLeftEdge = j <= 1;
-          const nearTop = Math.max(cvv || 0, dbv || 0) >= localPeak * 0.85;
-          const edgeOffset = nearRightEdge ? [-72, 0] : nearLeftEdge ? [72, 0] : [0, 0];
+          const edgeOffsetMag = narrowView ? 30 : 80;
+          const edgeOffset = nearRightEdge ? [-edgeOffsetMag, 0] : nearLeftEdge ? [edgeOffsetMag, 0] : [0, 0];
           // z2 (2026-08-30, per user: overlapping callouts on the deep-dive chart should
           // bring whichever one is hovered to the front) -- zrender draws higher-z2
           // elements over lower-z2 ones within the same zlevel; base z2 is staggered by
@@ -1202,8 +1225,8 @@ function buildCreamSeries(p, pts, opts) {
             itemStyle: { color: p.color, borderColor: dark ? '#1B2027' : '#FFFFFF', borderWidth: 1.5 },
             label: { show: true, formatter: `${m.label} (อายุ ${m.age})\n${lines.join('\n')}`, z2: 10 + mi,
               backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: p.color, borderWidth: 1.5, borderRadius: 6,
-              padding: [5, 8], color: dark ? '#E5E0D8' : '#2B2620', fontSize: 10, fontFamily: 'Prompt', fontWeight: 600,
-              position: nearTop ? 'bottom' : 'top', distance: 16, lineHeight: 14,
+              padding: calloutPadding, color: dark ? '#E5E0D8' : '#2B2620', fontSize: calloutFontSize, fontFamily: 'Prompt', fontWeight: 'normal',
+              lineHeight: calloutLineHeight,
               // 2026-08-31, per user: tried a fixed width + overflow:'break' here to fix
               // text escaping the callout box on iPad Safari, but ECharts' 'break' mode
               // breaks Thai text at the character level (no grapheme-cluster awareness),
@@ -1212,7 +1235,8 @@ function buildCreamSeries(p, pts, opts) {
               // Reverted to auto-sizing (no width/overflow) and shortened the label text
               // itself instead ("*เวนคืนเงินสด"/"มรดกส่งต่อ", dropping "มูลค่า"/"(CV)"/"(DB)")
               // so the box rarely needs to wrap in the first place.
-              align: nearRightEdge ? 'right' : nearLeftEdge ? 'left' : 'center', offset: edgeOffset } });
+              position: nearTop ? 'bottom' : 'top', distance: 16,
+              align: 'center', offset: edgeOffset } });
         }
       }
     });
