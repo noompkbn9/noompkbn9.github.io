@@ -1171,8 +1171,8 @@ function buildCreamSeries(p, pts, opts) {
         if (!showCallouts) return;
         const cvv = cv[j], dbv = db[j];
         const lines = [];
-        if (cvv) lines.push(`เวนคืน: ${fmtBaht(cvv)} บาท`);
-        if (dbv) lines.push(`เสียชีวิต: ${fmtBaht(dbv)} บาท`);
+        if (cvv) lines.push(`*มูลค่าเวนคืนเงินสด (CV): ${fmtBaht(cvv)} บาท`);
+        if (dbv) lines.push(`มรดกส่งต่อ (DB): ${fmtBaht(dbv)} บาท`);
         if (lines.length) {
           // Edge clamp (2026-08-30, per user: last milestone's bubble was clipped off the
           // right edge of the chart; also asked to keep the plot area at full size rather
@@ -1204,6 +1204,14 @@ function buildCreamSeries(p, pts, opts) {
               backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: p.color, borderWidth: 1.5, borderRadius: 6,
               padding: [5, 8], color: dark ? '#E5E0D8' : '#2B2620', fontSize: 10, fontFamily: 'Prompt', fontWeight: 600,
               position: nearTop ? 'bottom' : 'top', distance: 16, lineHeight: 14,
+              // Fixed width + overflow:'break' (2026-08-31, per user: text escaped the
+              // callout box on iPad Safari) -- without an explicit width, ECharts sizes the
+              // background box from its own text-measurement pass, which WebKit's canvas
+              // font metrics can disagree with slightly, letting glyphs render past the box
+              // edge. Pinning width forces a deterministic box and lets ECharts wrap long
+              // lines (the CV/DB label text got longer in this same change) inside it
+              // instead of relying on measured-width auto-sizing.
+              width: 148, overflow: 'break',
               align: nearRightEdge ? 'right' : nearLeftEdge ? 'left' : 'center', offset: edgeOffset } });
         }
       }
