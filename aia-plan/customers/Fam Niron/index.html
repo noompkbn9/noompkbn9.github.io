@@ -912,24 +912,19 @@ function tickIndices(plan, mode, opts) {
   // milestone age is force-included when its row is actually populated, which keeps that
   // protection and stops throwing away the real rows the source did send.
   //
-  // 2026-09-07, per user ("mile stone เริ่มถอนเงินเกษียณ ... เราก็แค่ลากกราฟ เติมให้ไปถึงเส้น
-  // milestone โดยคำนวณความสูงตาม scale y = เงินที่ถอนปีแรก"): CV/DB are not the only real data
-  // a row can carry. IFW-R's sparse rows report `withdrawal` for EVERY year while CV/DB
-  // still only land on year%10 -- e.g. IFW-R_15M_P5_W600K age 60 is
-  // {cv:0, db:0, sum_assured:15000000, withdrawal:600000}. Judging that row by CV/DB alone
-  // called it a placeholder, so the withdrawal-start age never became a tick and the
-  // ถอนเงินเกษียณ area's first plotted point jumped to the next real tick (age 69) where the
-  // cumulative is already 600,000 x 10 = 6M -- drawn as a vertical wall out of nowhere.
-  // With cashFlowTicks on (CV-chart call sites only), a milestone row counts as populated
-  // when it carries a real cash-flow figure too, so the line starts exactly at the
-  // milestone age at its own real first-year amount. The yearly TABLES deliberately do NOT
-  // pass it: a table row of CV 0 / DB 0 there would read as missing data, not as a start.
-  const CASH_FLOW_TICK_FIELDS = ['withdrawal', 'cash_coupon', 'healthy_bonus', 'auto_redemption'];
-  const cashFlowTicks = !!(opts && opts.cashFlowTicks);
+  // 2026-09-07: a cash-flow-only age (IFW-R reports `withdrawal` every year while CV/DB
+  // still land only on year%10, so the withdrawal-start row is cv:0/db:0/withdrawal:600000)
+  // deliberately does NOT become a tick. Tried it; measured it; the user rejected it, and
+  // was right: every category on this axis gets an EQUAL slice of width, so inserting age
+  // 60 put it a full 52px from 59 -- the same gap as the ten years 49->59 -- and stretched
+  // 59->69 to 105px while 79->89 stayed at 52px ("ระยะ 49, 59, 69, 79 ควรจะห่างเท่าๆ กัน
+  // เหมือนเดิม" / "อายุ 60 เราประมาณว่ามันอยู่ใกล้ๆ 59 ไม่ใช่หรอ"). Hiding its label did not
+  // help -- the slot still consumed the width. The ticks therefore stay exactly as they
+  // were, and buildCreamSeries instead hands wireChartOverlaysSync a `cashFlowLeadIns`
+  // entry so the line is drawn to that age's TRUE proportional pixel by the overlay.
   const milestoneAges = plan.milestones ? new Set(plan.milestones.map(m => m.age)) : null;
   const rowIsPopulated = r => (r.surrender_value || 0) > 0
-    || ((r.death_benefit_display ?? r.death_benefit) || 0) > 0
-    || (cashFlowTicks && CASH_FLOW_TICK_FIELDS.some(f => (r[f] || 0) > 0));
+    || ((r.death_benefit_display ?? r.death_benefit) || 0) > 0;
   if (mode === 'all' || mode === 'every1') return s.map((_,i)=>i);
   const step = mode === 'every5' ? 5 : 10;
   const idxs = [];
@@ -947,29 +942,7 @@ function tickIndices(plan, mode, opts) {
   // silently pick a placeholder row for a sparse plan and show a fake-looking 0. Per
   // user: fall back to policy-YEAR-based ticks there instead, since that's what actually
   // aligns with which years the sparse source data populated.
-  // hiddenAges (2026-09-07, per user: "ไม่ต้องใส่อายุจริงเข้ามาก็ได้ ให้ทำเป็นเหมือนเดิม แต่เรา
-  // อาศัยแต่เส้น milestone เพื่อวาดกราฟให้ถึง milestone" -- don't need to show the real age,
-  // keep the axis looking like before, but still use the milestone to draw the line up to
-  // it): a row that only qualifies via cashFlowTicks (real withdrawal/etc., but no real
-  // CV/DB of its own) still needs to be a genuine data point so the withdrawal LINE has a
-  // true anchor at its own real value -- removing it from `idxs` entirely would bring back
-  // the wall this fix was for. But axis labels/ticks are visual chrome, and forcing this
-  // age to APPEAR alongside 42/47/57/67/... looks arbitrary when nothing else about it is
-  // shown (no CV bar, no age%step alignment). So it stays a real point in the data, marked
-  // for the chart option to hide its label + tick mark -- the milestone's own callout
-  // (rendered separately, at this exact pixel) is what tells the viewer what's here.
-  const hiddenAges = new Set();
-  s.forEach((r,i) => {
-    const baseHit = r.year===1 || (plan.sparse ? r.year%step===0 : r.age%step===0) || i===last
-      || (milestoneAges && milestoneAges.has(r.age) && (!plan.sparse || rowIsPopulated(r)) && !(cashFlowTicks && (r.surrender_value||0)===0 && ((r.death_benefit_display ?? r.death_benefit)||0)===0));
-    const cashFlowOnlyHit = cashFlowTicks && milestoneAges && milestoneAges.has(r.age)
-      && (r.surrender_value||0)===0 && ((r.death_benefit_display ?? r.death_benefit)||0)===0
-      && CASH_FLOW_TICK_FIELDS.some(f => (r[f] || 0) > 0);
-    if (baseHit) idxs.push(i);
-    else if (cashFlowOnlyHit) { idxs.push(i); hiddenAges.add(r.age); }
-  });
-  idxs.sort((a,b) => a - b);
-  idxs.hiddenAges = hiddenAges;
+  s.forEach((r,i) => { if (r.year===1 || (plan.sparse ? r.year%step===0 : r.age%step===0) || i===last || (milestoneAges && milestoneAges.has(r.age) && (!plan.sparse || rowIsPopulated(r)))) idxs.push(i); });
   return idxs;
 }
 function rowAtYear(plan, year) { return plan.series.find(r=>r.year===year) || plan.series[plan.series.length-1]; }
@@ -1243,6 +1216,9 @@ function buildCreamSeries(p, pts, opts) {
   // ReferenceError otherwise, confirmed live -- block-scoped `const` inside an `if`
   // isn't visible after it closes, even within the same function).
   const floatingCallouts = [];
+  // Segments the overlay must draw at true proportional pixels -- see the cashFlowLeadIn
+  // block in the Net-Cash-In stack loop below for why the series itself cannot draw them.
+  const cashFlowLeadIns = [];
   const ispMode = isISPPlan(p.name);
   const cvHas = seriesHasData(cv), saHas = seriesHasData(sa);
   const axisColor = creamChartColors(opts.dark).axis;
@@ -1335,6 +1311,35 @@ function buildCreamSeries(p, pts, opts) {
     if (isWithdrawal) {
       const startIdx = pts.findIndex(r => (r.withdrawal || 0) > 0);
       if (startIdx > 0) rawData = rawData.map((v, i) => i < startIdx ? null : v);
+    }
+    // cashFlowLeadIn (2026-09-07, per user: "เราก็แค่ลากกราฟ เติมให้ไปถึงเส้น milestone โดย
+    // คำนวณความสูงตาม scale y = เงินที่ถอนปีแรก"): this stream can genuinely begin at an age
+    // that is not a tick -- IFW-R starts withdrawing at 60 while the ticks run 59, 69. The
+    // series can only carry one point per category, so its first plotted point lands on 69,
+    // where the cumulative is already ten years' worth -- the "wall" the user reported.
+    // ECharts cannot place a series point at a fractional category index (convertToPixel
+    // snaps 3.1 back onto 3 -- measured, same bug pixelForFracIdx exists for), so the
+    // segment from the real start age up to that first plotted point is handed to the
+    // overlay, which CAN draw at a true proportional pixel. Both ends are real figures read
+    // off real rows: the start age's own cumulative (= its first year's amount) and the
+    // first tick's cumulative -- nothing interpolated, only the x position is proportional.
+    const realStartRow = (p.series || []).find(r => (r[k] || 0) > 0);
+    const firstPlottedIdx = rawData.findIndex(v => v != null && v > 0);
+    if (realStartRow && firstPlottedIdx >= 0 && realStartRow.age < pts[firstPlottedIdx].age) {
+      const cumAt = r => cumField ? (r[cumField] || 0) : (cumMap[r.year] || 0);
+      // Stack base: everything already drawn BELOW this key in CASH_IN_STACK_ORDER_C, so a
+      // multi-stream stack's lead-in sits on the same shoulder the series itself does.
+      const below = CASH_IN_STACK_ORDER_C.slice(0, CASH_IN_STACK_ORDER_C.indexOf(k))
+        .filter(k2 => stackKeysPresent.has(k2));
+      const baseAt = r => below.reduce((s, k2) => {
+        const cf = CASH_IN_CUM_FIELD_C[k2];
+        return s + (cf ? (r[cf] || 0) : 0);
+      }, 0);
+      cashFlowLeadIns.push({
+        fromAge: realStartRow.age, fromBase: baseAt(realStartRow), fromValue: baseAt(realStartRow) + cumAt(realStartRow),
+        toAge: pts[firstPlottedIdx].age, toBase: baseAt(pts[firstPlottedIdx]), toValue: baseAt(pts[firstPlottedIdx]) + cumAt(pts[firstPlottedIdx]),
+        color: cand.stackColor,
+      });
     }
     series.push({ name: cand.label, type:'line', stack:cashInStackKey, z:1, data: rawData.map((v,i)=>wl(v,i)), symbol:'none', smooth: !isWithdrawal, showSymbol:false, connectNulls:true, lineStyle:{color:cand.stackColor, width:1}, itemStyle:{color:cand.stackColor}, areaStyle:{color:cand.stackColor, opacity:.4}, ...idxOpt });
   });
@@ -1649,8 +1654,11 @@ function buildCreamSeries(p, pts, opts) {
         // collapses to 0 and would pin the callout on the axis floor. Fall back to the
         // cash-flow cumulative the milestone is actually about -- the withdrawal-start box
         // then sits at its own real first-year amount, still read straight off the row.
-        const cashAnchor = Math.max(pts[j].cum_withdrawal || 0, pts[j].cum_auto_redemption || 0,
-          pts[j].cum_cash_coupon || 0, pts[j].healthy_bonus_cumulative || 0);
+        // pts[j] only exists when j is a REAL (integer) tick -- an interpolated milestone's
+        // j is a genuine fraction, so guard before reading the row.
+        const anchorRow = pts[j];
+        const cashAnchor = anchorRow ? Math.max(anchorRow.cum_withdrawal || 0, anchorRow.cum_auto_redemption || 0,
+          anchorRow.cum_cash_coupon || 0, anchorRow.healthy_bonus_cumulative || 0) : 0;
         const anchorY = (cvvPos == null && dbvPos == null) ? cashAnchor : Math.max(cvvPos || 0, dbvPos || 0);
         const lines = [];
         // 2026-09-04, per user: short CV:/DB: codes here too -- same reasoning as the
@@ -1708,7 +1716,7 @@ function buildCreamSeries(p, pts, opts) {
     // wireMilestoneCalloutHover's bring-to-front behavior below.
     if (markPointData.length) series[series.length - 1].markPoint = { silent: false, data: markPointData, ...idxOpt };
   }
-  return { series, floatingCallouts };
+  return { series, floatingCallouts, cashFlowLeadIns };
 }
 
 // 2026-09-03, per user: extracted so both planChartOption's initial (pre-sync) render
@@ -1777,11 +1785,12 @@ function pixelForFracIdx(chart, fracIdx) {
 // once per chart instance; 'finished' covers every future setOption/resize (filter
 // changes, theme/toggle re-renders, .resize() calls), 'dataZoom' covers pan/zoom (the
 // only interaction that does NOT go through a full setOption re-render).
-function wireChartOverlaysSync(chart, plan, floatingCallouts, dark) {
+function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLeadIns) {
   const { isLevelPremium, startAge, endAge, payYears } = paymentPeriodAges(plan);
   const hasBracket = isLevelPremium;
   const hasFloating = floatingCallouts && floatingCallouts.length > 0;
-  if (!hasBracket && !hasFloating) return;
+  const leadIns = cashFlowLeadIns || [];
+  if (!hasBracket && !hasFloating && !leadIns.length) return;
   const axisColor = creamChartColors(dark).axis;
   // Category axis: convertToPixel needs the tick's INDEX, not the raw age value (a raw
   // number is read as an index straight into the (usually much shorter) category list,
@@ -1807,6 +1816,33 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark) {
     const gridLeft = gridRect.x, gridRight = gridRect.x + gridRect.width;
     const gridTop = gridRect.y, gridBottom = gridRect.y + gridRect.height;
     const elements = [];
+
+    // Cash-flow lead-in (2026-09-07, per user): draw the part of a Net-Cash-In stream that
+    // begins between two ticks. The series itself can only start on a category, so without
+    // this its first plotted point is the next tick -- where the cumulative has already run
+    // for years -- and the area reads as a wall rising out of nothing. Here the same
+    // segment is drawn in real pixels: x from pixelForFracIdx (the age's TRUE proportional
+    // position, e.g. age 60 sits a tenth of the way from 59 to 69, NOT a whole slot), y
+    // from the axis' own scale via convertToPixel. Fill and stroke mirror the series'
+    // areaStyle/lineStyle exactly (opacity .4, width 1), and z sits below the CV bars
+    // (z:2) so it layers like the series area (z:1) it continues.
+    if (leadIns.length) {
+      const axesAges = chart.getOption().xAxis[0].data;
+      const yPx = v => chart.convertToPixel('grid', [0, v])[1];
+      leadIns.forEach(seg => {
+        const xFrom = pixelForFracIdx(chart, ageToIdx(axesAges, seg.fromAge));
+        const xTo = pixelForFracIdx(chart, ageToIdx(axesAges, seg.toAge));
+        if (!(xFrom >= gridLeft - 1 && xTo <= gridRight + 1 && xTo > xFrom)) return;
+        const yFrom = yPx(seg.fromValue), yTo = yPx(seg.toValue);
+        const yFromBase = yPx(seg.fromBase), yToBase = yPx(seg.toBase);
+        elements.push({ type: 'polygon', z: 1, z2: 0, silent: true,
+          shape: { points: [[xFrom, yFrom], [xTo, yTo], [xTo, yToBase], [xFrom, yFromBase]] },
+          style: { fill: seg.color, opacity: 0.4 } });
+        elements.push({ type: 'line', z: 1, z2: 1, silent: true,
+          shape: { x1: xFrom, y1: yFrom, x2: xTo, y2: yTo },
+          style: { stroke: seg.color, lineWidth: 1 } });
+      });
+    }
 
     if (hasBracket) {
       const ages = chart.getOption().xAxis[0].data;
@@ -2248,16 +2284,9 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark) {
   sync();
 }
 function planChartOption(plan, tickMode, dark) {
-  const idxs = tickIndices(plan, tickMode, { cashFlowTicks: true });
-  const hiddenAges = idxs.hiddenAges || new Set();
+  const idxs = tickIndices(plan, tickMode);
   const pts = extendPtsToMaturity(plan, idxs.map(i => plan.series[i]), tickMode);
   const ax = pts.map(p => p.age);
-  // 2026-09-07, per user: hiddenAges carries real data points added only so a cash-flow
-  // series (e.g. ถอนเงินเกษียณ) has a true anchor at its own milestone age -- the axis
-  // itself should still read exactly like before (no extra age label/tick mark), so those
-  // categories are blanked out here rather than removed from `ax`/`pts`.
-  const axisLabelFmt = (value, i) => hiddenAges.has(pts[i].age) ? '' : value;
-  const axisTickInterval = (i) => !hiddenAges.has(pts[i].age);
   const cc = creamChartColors(dark);
   const axisColor = cc.axis;
   const gridColor = cc.grid;
@@ -2294,7 +2323,7 @@ function planChartOption(plan, tickMode, dark) {
   // number.
   let minV = 0;
   pts.forEach(r => { minV = Math.min(minV, r.surrender_value || 0, r.death_benefit_display ?? r.death_benefit ?? 0, (r.cum_premium_display ?? r.cum_premium) || 0); });
-  const { series, floatingCallouts } = buildCreamSeries(plan, pts, { dark, showMilestoneCallouts: true, chartMax: maxV });
+  const { series, floatingCallouts, cashFlowLeadIns } = buildCreamSeries(plan, pts, { dark, showMilestoneCallouts: true, chartMax: maxV });
   const iconMap = {};
   series.forEach(s => {
     if (s.type === 'bar') iconMap[s.name] = { kind:'bar', color: s.itemStyle.color };
@@ -2331,7 +2360,7 @@ function planChartOption(plan, tickMode, dark) {
     tooltip: { trigger: 'axis', formatter: p => axisTooltipFormatter(p.filter(x => !x.seriesName.startsWith('__')), v => fmtBaht(v) + ' บาท', { iconMap, stacks: stackMap, yearLookup: (gridIdx, dataIdx) => (pts[dataIdx] && pts[dataIdx].year) || '' }), axisPointer: axisPointerCross(dark), ...tooltipStyle(dark) },
     legend: { bottom: 4, textStyle: { color: axisColor, fontSize: 11, fontFamily: 'Prompt' }, data: [...new Set(series.map(s => s.name))].filter(n => !n.startsWith('__')) },
     dataZoom: [{ type: 'inside' }],
-    xAxis: { type: 'category', data: ax, axisLine: { lineStyle: { color: gridColor } }, axisLabel: { color: axisColor, fontSize: 11, formatter: axisLabelFmt }, axisTick: { interval: axisTickInterval } },
+    xAxis: { type: 'category', data: ax, axisLine: { lineStyle: { color: gridColor } }, axisLabel: { color: axisColor, fontSize: 11 } },
     yAxis: { type: 'value', min: minV < 0 ? minV * 1.05 : 0, max: maxV * 1.12, axisLabel: { color: axisColor, fontSize: 10, formatter: v => (v/1e6).toFixed(1)+'M' }, splitLine: { lineStyle: { color: gridColor } } },
     // 2026-09-02, per user reference image: bracket FIRST, both text lines stacked
     // directly below it. 2026-09-03, per user ("อยากให้ปรับเส้นแถบให้ตรงกัน ถ้า icon เป็น
@@ -2360,6 +2389,7 @@ function planChartOption(plan, tickMode, dark) {
     // the LOCAL variable returned by this function call, never from chart.getOption()
     // (which normalizes/may drop unknown top-level keys).
     __floatingCallouts: floatingCallouts,
+    __cashFlowLeadIns: cashFlowLeadIns,
   };
 }
 
@@ -2496,19 +2526,15 @@ function compareSetOption(container, plans, tickMode, dark) {
   // visible instead of clipping it at 0, without letting one tiny negative drag the floor.
   let minV = 0;
   const plansData = plans.map(p => {
-    const idxs = tickIndices(p, tickMode, { cashFlowTicks: true });
-    const hiddenAges = idxs.hiddenAges || new Set();
+    const idxs = tickIndices(p, tickMode);
     const pts = extendPtsToMaturity(p, idxs.map(i => p.series[i]), tickMode);
     const pIspMode = isISPPlan(p.name);
     const cashInAreaMax = r => (r.cash_in_stack || []).reduce((s, item) => s + (CASH_IN_CUM_FIELD_C[item.key] ? (r[CASH_IN_CUM_FIELD_C[item.key]] || 0) : 0), 0);
     pts.forEach(r => { maxV = Math.max(maxV, r.death_benefit_display ?? r.death_benefit ?? 0, (r.cum_premium_display ?? r.cum_premium) || 0, r.cum_fee_total || 0, r.cum_premium_discount || 0, cashInAreaMax(r), cvStackHeight(r, pIspMode)); });
     pts.forEach(r => { minV = Math.min(minV, r.surrender_value || 0, r.death_benefit_display ?? r.death_benefit ?? 0, (r.cum_premium_display ?? r.cum_premium) || 0); });
-    return { p, pts, hiddenAges };
+    return { p, pts };
   });
-  // 2026-09-07, per user: same hiddenAges treatment as planChartOption -- a cash-flow-only
-  // milestone age stays a real data point (so its line has a true anchor) but its age
-  // label is blanked so the compare view's axis reads exactly as it did before.
-  const xAxis = plansData.map((d, i) => ({ gridIndex: i, type: 'category', data: d.pts.map(r => r.age), axisLine: { lineStyle: { color: gridColor } }, axisLabel: { color: axisColor, fontSize: 10, formatter: (value, vi) => d.hiddenAges.has(d.pts[vi].age) ? '' : value }, axisTick: { show: false } }));
+  const xAxis = plansData.map((d, i) => ({ gridIndex: i, type: 'category', data: d.pts.map(r => r.age), axisLine: { lineStyle: { color: gridColor } }, axisLabel: { color: axisColor, fontSize: 10 }, axisTick: { show: false } }));
   // CONFIRMED FIX (noompkbn9): axisLine used to show only on the first grid (i===0) --
   // every other plan's subplot had no y-axis line at all, so its bars had no visible
   // zero-baseline to anchor against and read as "floating" even though the underlying
@@ -4365,7 +4391,7 @@ function render() {
       inst.setOption(indivChartOption);
       wireDiscountBandLegendSync(inst);
       wireMilestoneCalloutHover(inst);
-      wireChartOverlaysSync(inst, indivPlan, indivChartOption.__floatingCallouts, dark);
+      wireChartOverlaysSync(inst, indivPlan, indivChartOption.__floatingCallouts, dark, indivChartOption.__cashFlowLeadIns);
       echartsInstances.push(inst);
       if (isLifetimeIncome99Plan(indivPlan.name)) {
         const lti99El = document.getElementById(`lti99chart-${idx}`);
