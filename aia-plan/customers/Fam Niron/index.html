@@ -1809,7 +1809,22 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
   // Re-entrancy guard: setOption inside a 'finished' handler triggers ANOTHER 'finished'
   // event -- skip re-applying when nothing actually moved, so this doesn't loop forever.
   let lastKey = null;
+  // syncing (2026-09-07): the box-measurement pass below (see boxPlacements comment)
+  // calls `chart.setOption` MID-FUNCTION to paint boxes before their real size can be
+  // read back -- that call fires ITS OWN 'finished' event, re-entering sync() from
+  // scratch before this outer call ever reaches the lastKey check at the bottom (that
+  // check only guards the FINAL setOption, not this one). Left unguarded, the nested
+  // call's own final setOption would win, then the outer call's stale final setOption
+  // would immediately overwrite it with numbers computed from its own earlier read --
+  // observed live as box sizes appearing to change (103->111px) between two setOption
+  // calls in the same tick. A simple boolean guards the whole function.
+  let syncing = false;
   const sync = () => {
+    if (syncing) return;
+    syncing = true;
+    try { syncBody(); } finally { syncing = false; }
+  };
+  const syncBody = () => {
     let gridRect;
     try { gridRect = chart.getModel().getComponent('grid').coordinateSystem.getRect(); }
     catch (e) { return; } // grid not ready yet -- 'finished' will fire again once it is
@@ -1994,6 +2009,36 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         if (px < gridLeft || px > gridRight) return null; // off-screen (zoomed/panned)
         return { c, px, py: Math.max(gridTop + 4, Math.min(gridBottom - 4, py)) };
       }).filter(Boolean).sort((a, b) => a.px - b.px);
+      // QUARTERS/quarterOn (used by the leader-line pass below, after real box rects are
+      // known) -- hoisted out of the per-callout loop since neither depends on `i`.
+      // The segment lands on a QUARTER MARK of the edge it meets -- 1/4, 2/4 or 3/4 along
+      // the bottom edge when the box sits over the age line, or of the near side edge when
+      // the space-search pushed the box off to one side ("เส้นควรไปชนกับกึ่งกลาง...หรือ 1/4,
+      // 2/4, 3/4"). The quarter nearest the incoming direction is chosen, so the join reads
+      // as deliberate rather than wherever the geometry fell (2026-09-05, per user).
+      const QUARTERS = [0.25, 0.5, 0.75];
+      const quarterOn = (start, size, target) => {
+        let best = QUARTERS[1], bestD = Infinity;
+        QUARTERS.forEach(q => { const d = Math.abs(start + size * q - target); if (d < bestD) { bestD = d; best = q; } });
+        return start + size * best;
+      };
+      // boxPlacements (2026-09-07, per user: "ผมงงว่าทำไมเส้นปะไม่ลากไปชน call out มันมีช่องว่าง
+      // ก่อนถึง call out" -- measured, confirmed on every callout in this chart, not just
+      // ครบสัญญา: a consistent 6-8px gap between the leader's end and the box's real right
+      // edge, growing more visible the longer the diagonal segment is (127px on ครบสัญญา,
+      // barely noticeable at 18px elsewhere -- same bug everywhere, just easier to see on
+      // one box than another, exactly the "logic must be identical, not per-chart" concern
+      // raised the same day). Root cause: `measureBlockWidth`'s own canvas
+      // `ctx.measureText()` and ECharts' internal text-layout engine do not agree on this
+      // Prompt-font string's width (measured 91px vs the box's real painted 83px) -- a
+      // rendering-engine mismatch no amount of retuning the estimate can close for good,
+      // since it isn't wrong by a fixed ratio. Rather than chase another estimate, this now
+      // measures the ACTUAL painted box: boxes are pushed and painted FIRST (one
+      // intermediate setOption, box position/size unaffected by anything below), their
+      // real on-screen rects are read back from the scene graph, and THAT is what the
+      // leader-line pass aims at -- so the endpoint can only ever be wrong by sub-pixel
+      // rounding, never by a font-metric disagreement.
+      const boxPlacements = [];
       resolved.forEach(({ c, px, py: anchorY }, i) => {
         // 2026-09-05: +BOX_MARGIN on each axis. The collision math runs on a computed
         // box size while the rendered box is a little larger (1.5px border each side,
@@ -2156,89 +2201,11 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         // อายุ X" milestone actually is. Same dashed visual language as the exact-tick
         // milestones' own markLines, so the two read as one family.
         //
-        // Drawn as an L: straight up the age line from the axis to the box's own vertical
-        // level, then a short horizontal hop to the box if the space-search placed it off
-        // to one side. `anchorY` (interpolated) still drives WHERE the box goes -- pure
-        // layout, no number claimed by it.
-        // 2026-09-05, per user (items 3 + 4): the leader used to be an L -- straight up
-        // the age line, then a HORIZONTAL hop at the box's own bottom edge. That hop ran
-        // along a constant y, which is exactly where a flat DB/SA line lives, so it
-        // disappeared into that line ("ไม่ควรลากไปบนแนวเส้น DB ควรขยับให้เห็น"). Replaced
-        // with a knee a little below the box and a single sloped segment from there to
-        // the box, so the leader always has vertical extent and never traces a data line.
-        //
-        // The segment lands on a QUARTER MARK of the edge it meets -- 1/4, 2/4 or 3/4
-        // along the bottom edge when the box sits over the age line, or of the near side
-        // edge when the space-search pushed the box off to one side ("เส้นควรไปชนกับ
-        // กึ่งกลาง...หรือ 1/4, 2/4, 3/4"). The quarter nearest the incoming direction is
-        // chosen, so the join reads as deliberate rather than wherever the geometry fell.
-        const QUARTERS = [0.25, 0.5, 0.75];
-        const quarterOn = (start, size, target) => {
-          let best = QUARTERS[1], bestD = Infinity;
-          QUARTERS.forEach(q => { const d = Math.abs(start + size * q - target); if (d < bestD) { bestD = d; best = q; } });
-          return start + size * best;
-        };
-        // 2026-09-05, per user ("เส้นปะที่ลากหา call out ควรลากติดกับ call out เลยไหม" -- yes:
-        // a leader that stops short reads as a stray tick rather than as pointing AT the
-        // box). boxWidth/boxHeight carry BOX_MARGIN, which exists only to keep neighbours
-        // apart during collision -- the box actually PAINTED is that much smaller, and
-        // aiming at the inflated rect left the line ending 6.5px short of the border
-        // (measured). Aim at the drawn rect instead; the inflated one still governs
-        // collision and the grid clamp.
-        // The drawn width is NOT boxWidth - BOX_MARGIN: boxWidth also carries a 90px
-        // minimum (a collision-only floor so narrow boxes still keep their neighbours at
-        // arm's length), and ECharts sizes the rendered box to its text regardless. For a
-        // label narrower than that floor the two disagree, which is what left the ครบสัญญา
-        // leader ending 15.6px out in the open -- it was aiming at the floor's right edge,
-        // not the border the reader can see. Measure the drawn width directly.
-        const drawWidth = measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2;
-        const drawRight = boxLeft + drawWidth;
-        const drawBottom = boxTop + boxHeight - BOX_MARGIN;
-        const kneeY = Math.min(gridBottom - 4, drawBottom + 14);
-        let attachX, attachY;
-        if (px >= boxLeft && px <= drawRight) {
-          // 2026-09-05, per user ("ทำไมบางเส้นที่ลากขึ้นไปตรงๆ แล้วปลายต้องงอด้วย ทำไมไม่
-          // ตรงไปเลย"): when the box sits over the age line the leader has no reason to
-          // bend at all -- it was only kinking because the join was being snapped to the
-          // nearest quarter mark, which rarely lands exactly on the age. The quarter rule
-          // was asked for so the join reads as deliberate rather than arbitrary, and a
-          // straight line rising to the box directly above its own age is the most
-          // deliberate join there is, so this case now attaches straight at the age.
-          // Quarter snapping stays for the side case below, where the segment has to
-          // slope anyway. The inset keeps the join off the box's rounded corners.
-          attachY = drawBottom;
-          attachX = Math.max(boxLeft + 12, Math.min(drawRight - 12, px));
-        } else {
-          attachX = px < boxLeft ? boxLeft : drawRight;
-          attachY = quarterOn(boxTop, drawBottom - boxTop, kneeY);
-        }
-        // 2026-09-05, per user ("IFW-R ดูเหมือนเส้นปะลากไม่เชื่อมเข้า call out"): measured, the
-        // ครบสัญญา leader was ending 15.6px clear of its box. Rather than keep chasing which
-        // branch computed the join from a stale rectangle, pin the result: the join is
-        // clamped onto the drawn box, so a leader can only ever finish ON the border.
-        attachX = Math.max(boxLeft, Math.min(drawRight, attachX));
-        attachY = Math.max(boxTop, Math.min(drawBottom, attachY));
-        // z2 well below every box's own (see baseZ2 below) -- per user item 5, a callout
-        // must sit ON TOP of any leader that happens to pass through it, including
-        // another callout's.
-        // 2026-09-05, per user: leader weight 1 -> 1.25. On a 2x screen that is a clean
-        // 2.5 device px; on a 1x screen the extra quarter-pixel is spread as anti-aliasing
-        // either side, so it reads a touch softer rather than crisper -- if presence is
-        // what is wanted there, opacity (0.75) is the more effective lever than width.
-        const legStyle = { stroke: c.color, lineWidth: 1.25, lineDash: [3, 3], opacity: 0.75 };
-        if (Math.abs(attachX - px) < 0.5) {
-          // Straight shot from the axis to the box -- drawn as ONE segment so the dash
-          // pattern runs continuously instead of restarting at the (invisible) knee.
-          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-            shape: { x1: px, y1: gridBottom, x2: px, y2: attachY }, style: legStyle });
-        } else {
-          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-            shape: { x1: px, y1: gridBottom, x2: px, y2: kneeY }, style: legStyle });
-          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-            shape: { x1: px, y1: kneeY, x2: attachX, y2: attachY }, style: legStyle });
-        }
-        const baseZ2 = 500 + i; // above every leader line (z2 10+i), per user item 5
-        elements.push({ type: 'text', z: 100, z2: baseZ2, silent: false, cursor: 'default',
+        // Box is pushed here, now, with a `name` -- the leader-line pass right after this
+        // loop reads its REAL painted size back via that name (see boxPlacements comment
+        // above) rather than re-estimating it.
+        boxPlacements.push({ c, px, anchorY, boxLeft, boxTop, boxHeight, boxBottom, i });
+        elements.push({ type: 'text', z: 100, z2: 500 + i, silent: false, cursor: 'default',
         // 2026-09-05: position by the box's LEFT edge, not its centre. `style.align`
         // only centres the TEXT INSIDE the box -- the graphic element's own `left` is
         // still its bounding-box left edge, so passing the centre x here shifted every
@@ -2247,13 +2214,69 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         // left of 603). boxLeft is what the collision/clamp math produced, so use it.
           left: boxLeft, top: boxTop,
           onmouseover: function () { this.attr({ z: 300, z2: 900 }); },
-          onmouseout: function () { this.attr({ z: 100, z2: baseZ2 }); },
+          onmouseout: function () { this.attr({ z: 100, z2: 500 + i }); },
           style: { text: c.text, fontSize: c.fontSize, fontFamily: 'Prompt', fontWeight: 'normal',
             lineHeight: c.lineHeight, align: 'center', verticalAlign: 'top',
             padding: c.padding, backgroundColor: dark ? '#1B2027' : '#FFFFFF',
             borderColor: c.color, borderWidth: 1.5, borderRadius: 10,
             fill: dark ? '#E5E0D8' : '#2B2620' } });
       });
+      // Paint the boxes now (bracket elements, if any, are already in `elements` too) so
+      // their REAL rects exist in the scene graph to measure -- see boxPlacements comment.
+      if (boxPlacements.length) {
+        chart.setOption({ graphic: elements }, { replaceMerge: ['graphic'] });
+        // A graphic 'text' element with backgroundColor/borderColor isn't itself a leaf
+        // in the scene graph -- zrender decomposes it into a child `rect` (the visible
+        // border/fill) plus one `tspan` per line, all under an internal `text`-type
+        // parent. `name` does NOT propagate down to those children (confirmed live: none
+        // of them carried the name set above), but `z2` DOES, so the background rect for
+        // box i is found by z2 alone -- its own shape.width/height is exactly the drawn
+        // box size, no transform/getBoundingRect juggling needed.
+        const realSize = {};
+        chart.getZr().storage.getDisplayList(true).forEach(el => {
+          if (el.type === 'rect' && el.z2 != null && el.z2 >= 500) {
+            realSize[el.z2 - 500] = { width: el.shape.width, height: el.shape.height };
+          }
+        });
+        boxPlacements.forEach(({ c, px, anchorY, boxLeft, boxTop, boxHeight, boxBottom, i }) => {
+          const BOX_MARGIN = 8;
+          // Real painted size when available; falls back to the pre-paint estimate (minus
+          // the collision-only BOX_MARGIN/90px-floor inflation) only if the lookup somehow
+          // missed this box, so a leader is never left entirely undrawn.
+          const real = realSize[i];
+          const drawWidth = real ? real.width : Math.max(measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2, boxHeight - BOX_MARGIN);
+          const drawHeight = real ? real.height : boxHeight - BOX_MARGIN;
+          const drawRight = boxLeft + drawWidth;
+          const drawBottom = boxTop + drawHeight;
+          const kneeY = Math.min(gridBottom - 4, drawBottom + 14);
+          let attachX, attachY;
+          if (px >= boxLeft && px <= drawRight) {
+            // 2026-09-05, per user ("ทำไมบางเส้นที่ลากขึ้นไปตรงๆ แล้วปลายต้องงอด้วย ทำไมไม่
+            // ตรงไปเลย"): when the box sits over the age line the leader has no reason to
+            // bend at all. A straight line rising to the box directly above its own age is
+            // the most deliberate join there is.
+            attachY = drawBottom;
+            attachX = Math.max(boxLeft + 12, Math.min(drawRight - 12, px));
+          } else {
+            attachX = px < boxLeft ? boxLeft : drawRight;
+            attachY = quarterOn(boxTop, drawBottom - boxTop, kneeY);
+          }
+          // Clamped onto the REAL drawn box -- a leader can only ever finish ON the border
+          // the reader can actually see, never past it or short of it.
+          attachX = Math.max(boxLeft, Math.min(drawRight, attachX));
+          attachY = Math.max(boxTop, Math.min(drawBottom, attachY));
+          const legStyle = { stroke: c.color, lineWidth: 1.25, lineDash: [3, 3], opacity: 0.75 };
+          if (Math.abs(attachX - px) < 0.5) {
+            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+              shape: { x1: px, y1: gridBottom, x2: px, y2: attachY }, style: legStyle });
+          } else {
+            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+              shape: { x1: px, y1: gridBottom, x2: px, y2: kneeY }, style: legStyle });
+            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+              shape: { x1: px, y1: kneeY, x2: attachX, y2: attachY }, style: legStyle });
+          }
+        });
+      }
     }
 
     const key = JSON.stringify(elements.map(e => [e.type, e.left, e.top, e.shape]));
