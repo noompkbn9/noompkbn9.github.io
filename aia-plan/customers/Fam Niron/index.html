@@ -2224,26 +2224,49 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
       // Paint the boxes now (bracket elements, if any, are already in `elements` too) so
       // their REAL rects exist in the scene graph to measure -- see boxPlacements comment.
       if (boxPlacements.length) {
-        chart.setOption({ graphic: elements }, { replaceMerge: ['graphic'] });
-        // A graphic 'text' element with backgroundColor/borderColor isn't itself a leaf
-        // in the scene graph -- zrender decomposes it into a child `rect` (the visible
-        // border/fill) plus one `tspan` per line, all under an internal `text`-type
-        // parent. `name` does NOT propagate down to those children (confirmed live: none
-        // of them carried the name set above), but `z2` DOES, so the background rect for
-        // box i is found by z2 alone -- its own shape.width/height is exactly the drawn
-        // box size, no transform/getBoundingRect juggling needed.
-        const realSize = {};
-        chart.getZr().storage.getDisplayList(true).forEach(el => {
-          if (el.type === 'rect' && el.z2 != null && el.z2 >= 500) {
-            realSize[el.z2 - 500] = { width: el.shape.width, height: el.shape.height };
-          }
-        });
+        // 2026-09-07, per user ("เปิดมาครั้งแรกเส้นประก็หายเลย"): this intermediate
+        // setOption/getZr sequence is new, unproven code running inside the SAME function
+        // that must still reach its own FINAL setOption below no matter what -- if
+        // anything in this measurement step throws (observed as a real risk: the very
+        // first sync() a chart instance ever runs has no prior render pass to warm up
+        // against), an uncaught error here aborts the whole syncBody() call, and the
+        // chart is left frozen on whatever the LAST setOption happened to be. On a
+        // chart's first-ever sync that is nothing at all -- not even the box-only
+        // intermediate state, since this code runs before boxes are drawn a second time
+        // -- explaining leaders (and only leaders) being completely absent. Wrapped so a
+        // measurement failure degrades to the pre-real-size estimate for every box
+        // (still draws a leader, just with the old up-to-8px tolerance) rather than
+        // skipping the final setOption entirely.
+        let realSize = {};
+        try {
+          chart.setOption({ graphic: elements }, { replaceMerge: ['graphic'] });
+          // A graphic 'text' element with backgroundColor/borderColor isn't itself a leaf
+          // in the scene graph -- zrender decomposes it into a child `rect` (the visible
+          // border/fill) plus one `tspan` per line, all under an internal `text`-type
+          // parent. `name` does NOT propagate down to those children (confirmed live:
+          // none of them carried the name set above), but `z2` DOES, so the background
+          // rect for box i is found by z2 alone -- its own shape.width/height is exactly
+          // the drawn box size, no transform/getBoundingRect juggling needed.
+          chart.getZr().storage.getDisplayList(true).forEach(el => {
+            if (el.type === 'rect' && el.z2 != null && el.z2 >= 500) {
+              realSize[el.z2 - 500] = { width: el.shape.width, height: el.shape.height };
+            }
+          });
+        } catch (e) { realSize = {}; }
         boxPlacements.forEach(({ c, px, anchorY, boxLeft, boxTop, boxHeight, boxBottom, i }) => {
+          try {
           const BOX_MARGIN = 8;
           // Real painted size when available; falls back to the pre-paint estimate (minus
-          // the collision-only BOX_MARGIN/90px-floor inflation) only if the lookup somehow
-          // missed this box, so a leader is never left entirely undrawn.
-          const real = realSize[i];
+          // the collision-only BOX_MARGIN/90px-floor inflation) if the lookup missed this
+          // box OR came back as 0x0 -- confirmed live (2026-09-07, "เปิดมาครั้งแรกเส้นประก็
+          // หาย"): on the very FIRST sync() a chart instance ever runs (no prior render
+          // pass to warm up ECharts' text-layout engine), the just-created rect's
+          // shape.width/height can still read 0 immediately after the intermediate
+          // setOption -- truthy object, zero size, which silently produced a
+          // zero-length/collapsed leader instead of falling back. `> 0` catches that;
+          // every later sync() (resize, dataZoom, switching plans) has already warmed up
+          // and measures correctly on the first try.
+          const real = realSize[i] && realSize[i].width > 0 ? realSize[i] : null;
           const drawWidth = real ? real.width : Math.max(measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2, boxHeight - BOX_MARGIN);
           const drawHeight = real ? real.height : boxHeight - BOX_MARGIN;
           const drawRight = boxLeft + drawWidth;
@@ -2274,6 +2297,15 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
               shape: { x1: px, y1: gridBottom, x2: px, y2: kneeY }, style: legStyle });
             elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
               shape: { x1: px, y1: kneeY, x2: attachX, y2: attachY }, style: legStyle });
+          }
+          } catch (e) {
+            // Same reasoning as the outer try above -- one box's leader math failing
+            // must not blank out every OTHER box's leader (a forEach throw aborts the
+            // whole loop). Falls back to the simplest possible leader: straight up from
+            // the axis to the box's own top, which is always geometrically valid.
+            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+              shape: { x1: px, y1: gridBottom, x2: px, y2: boxTop },
+              style: { stroke: c.color, lineWidth: 1.25, lineDash: [3, 3], opacity: 0.75 } });
           }
         });
       }
