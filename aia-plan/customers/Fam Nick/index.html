@@ -1216,6 +1216,15 @@ function buildCreamSeries(p, pts, opts) {
   // ReferenceError otherwise, confirmed live -- block-scoped `const` inside an `if`
   // isn't visible after it closes, even within the same function).
   const floatingCallouts = [];
+  // compareDashLines (2026-09-07, per user: "กรณี milestone ที่ไม่มีอายุนั้นบนกราฟ ให้สร้าง
+  // เส้นปะคล้ายๆ แบบ deep dive ขึ้นมาแทน"): the compare view (no callout boxes, per the same
+  // user's earlier "แต่ไม่ต้องมี call out") still needs to MARK an interpolated milestone
+  // (one whose age isn't a real tick) at its own true position -- a native ECharts markLine
+  // can't do that on a category axis (xAxis: j only works for an INTEGER j; the same
+  // fractional-index snapping bug pixelForFracIdx exists for elsewhere). Collected here,
+  // drawn later by the compare view's own lightweight overlay (see
+  // wireCompareDashedMilestones) as a plain dashed vertical line + label, no box.
+  const compareDashLines = [];
   // Segments the overlay must draw at true proportional pixels -- see the cashFlowLeadIn
   // block in the Net-Cash-In stack loop below for why the series itself cannot draw them.
   const cashFlowLeadIns = [];
@@ -1603,27 +1612,20 @@ function buildCreamSeries(p, pts, opts) {
       }
       if (j >= 0) {
         const inlineLabel = showCallouts ? { show:false } : { formatter: `${m.label} (${m.age})`, color:'#6b5f52', fontSize:10, position:'insideEndTop' };
-        // 2026-09-05, per user ("บางกราฟแสดงเส้นทุนประกันไม่ครบ", after the dash-style change
-        // did not fix it -- correctly: "ผมว่านั่นไม่ใช่การแก้ปัญหา"): THIS was what hid the line.
-        // The connector below is a SOLID 2.5px line in the plan colour drawn at
-        // max(cv, db) between the two ticks flanking an interpolated milestone -- for
-        // every IFW/IFG plan that value IS the sum assured (10,000,000), so it lies
-        // exactly on the ทุนประกัน line, and a markLine renders above the series
-        // regardless of the series z, so no amount of z or dash tuning could win.
-        // It is only needed where the milestone has no other visual anchor, i.e. the
-        // compare view: with callouts on, each one now draws its own dashed leader from
-        // the axis at the milestone's true age, which says the same thing without
-        // painting over another series.
         if (cvvInterp != null && lo >= 0 && hi >= 0 && !showCallouts) {
-          // 2026-09-02, per user: solid, plan-colored, same width as the real DB line
-          // (buildCreamSeries's own DB series push, width:2.5) -- this connector traces
-          // the exact same two real CV/DB points the DB curve already passes through, so
-          // styling it to match makes it read as a continuation of that line rather than
-          // a separate dashed annotation crossing over it.
-          markLineData.push([
-            { coord: [lo, Math.max(cv[lo] || 0, db[lo] || 0)], lineStyle: { color:p.color, type:'solid', width:2.5 }, label: inlineLabel },
-            { coord: [hi, Math.max(cv[hi] || 0, db[hi] || 0)] }
-          ]);
+          // 2026-09-07, per user ("กรณี milestone ที่ไม่มีอายุนั้นบนกราฟ ให้สร้างเส้นปะคล้ายๆ
+          // แบบ deep dive ขึ้นมาแทน"): this used to draw a SOLID 2.5px plan-colored connector
+          // between the two real ticks flanking the milestone, purely so `inlineLabel` had
+          // somewhere to attach (a native markLine can't sit at a fractional `j` on a
+          // category axis) -- for IFW/IFG that solid line landed exactly on the ทุนประกัน
+          // line (max(cv,db) there IS the sum assured), a real bug fixed 2026-09-05 by
+          // gating it to compare-view-only, but the underlying "no real marker at the
+          // milestone's own age" problem remained for compare view. Routed through
+          // compareDashLines instead -- drawn as a proper dashed vertical line at this
+          // milestone's TRUE fractional pixel position (pixelForFracIdx-style, resolved
+          // per-grid by wireCompareDashedMilestones), matching how Deep-dive's own
+          // interpolated-milestone leader works, just without a callout box.
+          compareDashLines.push({ fracIdx: j, label: `${m.label} (${m.age})`, color: '#94867A' });
         } else if (!showCallouts) {
           // 2026-09-05, per user ("ถ้าให้รูปแบบ call out มีเส้นปะลากไปที่ call out แล้ว เส้นประ
           // แนวตั้งยังจำเป็นอยู่ไหม" -- no, it is not): with callouts on, each one already
@@ -1716,7 +1718,7 @@ function buildCreamSeries(p, pts, opts) {
     // wireMilestoneCalloutHover's bring-to-front behavior below.
     if (markPointData.length) series[series.length - 1].markPoint = { silent: false, data: markPointData, ...idxOpt };
   }
-  return { series, floatingCallouts, cashFlowLeadIns };
+  return { series, floatingCallouts, cashFlowLeadIns, compareDashLines };
 }
 
 // 2026-09-03, per user: extracted so both planChartOption's initial (pre-sync) render
@@ -1762,12 +1764,140 @@ function measureTextWidth(text, fontSize, fontFamily) {
 function measureBlockWidth(text, fontSize, fontFamily) {
   return Math.max(...String(text).split('\n').map(l => measureTextWidth(l, fontSize, fontFamily)));
 }
+// Category axis: convertToPixel needs the tick's INDEX, not the raw age value (a raw
+// number is read as an index straight into the (usually much shorter) category list,
+// producing wildly out-of-range pixels). Returns a genuine fraction when `age` falls
+// between two real ticks -- hoisted to module scope so both the single-grid overlay
+// (wireChartOverlaysSync) and the compare view's multi-grid one share one definition.
+function ageToIdx(ages, age) {
+  const exact = ages.indexOf(age);
+  if (exact >= 0) return exact;
+  let lo = -1, hi = -1;
+  for (let k = 0; k < ages.length; k++) {
+    if (ages[k] < age) lo = k;
+    if (ages[k] > age && hi < 0) hi = k;
+  }
+  if (lo >= 0 && hi >= 0) return lo + (age - ages[lo]) / (ages[hi] - ages[lo]);
+  return lo >= 0 ? lo : (hi >= 0 ? hi : 0);
+}
 function pixelForFracIdx(chart, fracIdx) {
   const lo = Math.floor(fracIdx), hi = Math.ceil(fracIdx);
   if (lo === hi) return chart.convertToPixel('grid', [lo, 0])[0];
   const pxLo = chart.convertToPixel('grid', [lo, 0])[0];
   const pxHi = chart.convertToPixel('grid', [hi, 0])[0];
   return pxLo + (pxHi - pxLo) * (fracIdx - lo);
+}
+// Same fractional-index-to-pixel fix as pixelForFracIdx, for a specific grid in a
+// multi-grid chart (the compare view's side-by-side plan subplots) instead of the
+// single unnamed 'grid' coordinate system a one-grid chart has.
+function pixelForFracIdxGrid(chart, gridIndex, fracIdx) {
+  const lo = Math.floor(fracIdx), hi = Math.ceil(fracIdx);
+  const cs = { xAxisIndex: gridIndex, yAxisIndex: gridIndex };
+  if (lo === hi) return chart.convertToPixel(cs, [lo, 0])[0];
+  const pxLo = chart.convertToPixel(cs, [lo, 0])[0];
+  const pxHi = chart.convertToPixel(cs, [hi, 0])[0];
+  return pxLo + (pxHi - pxLo) * (fracIdx - lo);
+}
+// 2026-09-07, per user ("กรณี milestone ที่ไม่มีอายุนั้นบนกราฟ ให้สร้างเส้นปะคล้ายๆ แบบ deep
+// dive ขึ้นมาแทน" -- explicitly without a callout box, per the same user's earlier "แต่ไม่
+// ต้องมี call out"): the compare view's interpolated milestones (age isn't a real x-axis
+// tick) used to have no marker of their own at all -- see compareDashLines' declaration in
+// buildCreamSeries for what this replaced. `dashLines` entries are
+// { gridIndex, fracIdx, label, color }, one per plan's compareDashLines, already tagged
+// with which grid they belong to by compareSetOption. Deliberately simpler than
+// wireChartOverlaysSync: one straight dashed line grid-top to grid-bottom (matching how
+// the OTHER, exact-tick milestones' native markLine already spans the plot) plus one
+// plain text label near the top -- no leader, no knee, no collision search, no
+// background/border box.
+function wireCompareDashedMilestones(chart, dashLines, leadIns, dark) {
+  if ((!dashLines || !dashLines.length) && (!leadIns || !leadIns.length)) return;
+  // 2026-09-07, per user ("สีตัวหนังสือควรเหมือนกับแบบเดิม"): the exact-tick milestones'
+  // own native markLine label hardcodes '#6b5f52' with no dark-mode variant at all
+  // (confirmed by reading its own definition) -- matching it exactly means NOT giving
+  // this one a dark-aware color of its own, even though that reads as an inconsistency
+  // already present in the original.
+  const labelColor = '#6b5f52';
+  let lastKey = null;
+  const sync = () => {
+    const elements = [];
+    // Cash-flow lead-in (2026-09-07, per user: "เจอปัญหาถอนเงินเกษียณวาดไม่ถึงอายุเริ่มรับ
+    // เงินเหมือนกับ deep dive ลองแก้ด้วยวิธีเดียวกันดู"): compare view has the exact same
+    // wall-at-the-next-tick problem wireChartOverlaysSync's own leadIns block fixed for
+    // Deep-dive (see that comment for the root cause) -- it was never drawn here because
+    // compare view never called that single-grid-only function. Same fix, generalized to
+    // a specific grid: x via pixelForFracIdxGrid, y via convertToPixel scoped to that
+    // grid's own xAxisIndex/yAxisIndex instead of the single unnamed 'grid'.
+    (leadIns || []).forEach(seg => {
+      let gridRect;
+      try { gridRect = chart.getModel().getComponent('grid', seg.gridIndex).coordinateSystem.getRect(); }
+      catch (e) { return; }
+      const cs = { xAxisIndex: seg.gridIndex, yAxisIndex: seg.gridIndex };
+      const yPx = v => chart.convertToPixel(cs, [0, v])[1];
+      const xFrom = pixelForFracIdxGrid(chart, seg.gridIndex, ageToIdx(seg.ages, seg.fromAge));
+      const xTo = pixelForFracIdxGrid(chart, seg.gridIndex, ageToIdx(seg.ages, seg.toAge));
+      if (!(xFrom >= gridRect.x - 1 && xTo <= gridRect.x + gridRect.width + 1 && xTo > xFrom)) return;
+      const yFrom = yPx(seg.fromValue), yTo = yPx(seg.toValue);
+      const yFromBase = yPx(seg.fromBase), yToBase = yPx(seg.toBase);
+      elements.push({ type: 'polygon', z: 1, z2: 0, silent: true,
+        shape: { points: [[xFrom, yFrom], [xTo, yTo], [xTo, yToBase], [xFrom, yFromBase]] },
+        style: { fill: seg.color, opacity: 0.4 } });
+      elements.push({ type: 'line', z: 1, z2: 1, silent: true,
+        shape: { x1: xFrom, y1: yFrom, x2: xTo, y2: yTo },
+        style: { stroke: seg.color, lineWidth: 1 } });
+    });
+    // 2026-09-07, per user ("ใช้รูปแบบเส้นเหมือน mile stone ในกราฟเปรียบเทียบที่มีแท่งอายุ
+    // เลย และตัวหนังสือ rotate ให้อ่านเหมือนกันด้วย"): match the OTHER (exact-tick)
+    // milestones' own native markLine label exactly -- measured live (a throwaway test
+    // chart with the identical markLine label config) that ECharts auto-rotates a
+    // `position:'insideEndTop'` label on a vertical line by exactly +90 degrees
+    // (rotation === Math.PI/2 in the actual scene graph), reading bottom-to-top
+    // alongside the line. Replicated here rather than guessed.
+    //
+    // Rotated text occupies vertical, not horizontal, space, so two close milestones
+    // (e.g. bonus-start at 55, withdrawal-start at 60) need far LESS horizontal
+    // clearance than the old horizontal-text version did -- collision handling is
+    // simplified to a horizontal nudge instead of vertical stacking.
+    const placedByGrid = {};
+    (dashLines || []).slice().sort((a, b) => a.gridIndex - b.gridIndex || a.fracIdx - b.fracIdx).forEach((d, i) => {
+      let gridRect, px;
+      try {
+        gridRect = chart.getModel().getComponent('grid', d.gridIndex).coordinateSystem.getRect();
+        px = pixelForFracIdxGrid(chart, d.gridIndex, d.fracIdx);
+      } catch (e) { return; } // this grid not ready/visible yet -- 'finished' will fire again
+      if (px < gridRect.x || px > gridRect.x + gridRect.width) return; // zoomed/panned off-screen
+      elements.push({ type: 'line', z: 100, z2: 5 + i, silent: true,
+        shape: { x1: px, y1: gridRect.y, x2: px, y2: gridRect.y + gridRect.height },
+        style: { stroke: d.color, lineWidth: 1.2, lineDash: [3, 3], opacity: 0.9 } });
+      const NUDGE = 12; // ~one text-height's worth of horizontal clearance
+      const placed = placedByGrid[d.gridIndex] || (placedByGrid[d.gridIndex] = []);
+      // 2026-09-07, per user ("ตัวหนังสือควรอยู่ด้านซ้ายของเส้น"): measured live -- with
+      // `rotation: Math.PI/2`, `left: px` puts the text's rendered bounding box spanning
+      // [px, px+10] (i.e. to the RIGHT), matching what the user flagged as wrong.
+      // `left: px - 12` puts it at [px-12, px-2], hugging the LEFT side with a small gap
+      // -- verified against the actual rendered rect, not assumed from the rotation math.
+      let left = px - 12;
+      let tries = 0;
+      while (placed.some(p => Math.abs(left - p) < NUDGE) && tries < 6) {
+        left -= NUDGE;
+        tries++;
+      }
+      placed.push(left);
+      elements.push({ type: 'text', z: 100, z2: 5 + i, silent: true,
+        left, top: gridRect.y + 4, rotation: Math.PI / 2,
+        style: { text: d.label, fontSize: 10, fontFamily: 'Prompt', fill: labelColor } });
+    });
+    const key = JSON.stringify(elements.map(e => [e.type, e.left, e.top, e.shape]));
+    if (key === lastKey) return;
+    lastKey = key;
+    chart.setOption({ graphic: elements }, { replaceMerge: ['graphic'] });
+  };
+  chart.on('finished', sync);
+  chart.on('dataZoom', sync);
+  if (typeof ResizeObserver !== 'undefined' && chart.getDom()) {
+    try { new ResizeObserver(() => { lastKey = null; sync(); }).observe(chart.getDom()); }
+    catch (e) { /* observer unavailable -- resize just keeps the previous positions */ }
+  }
+  sync();
 }
 // 2026-09-03, per user: syncs BOTH the payment-period bracket AND every interpolated-
 // position milestone callout (bonus speech-bubbles, general breakeven-type callouts
@@ -1792,39 +1922,10 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
   const leadIns = cashFlowLeadIns || [];
   if (!hasBracket && !hasFloating && !leadIns.length) return;
   const axisColor = creamChartColors(dark).axis;
-  // Category axis: convertToPixel needs the tick's INDEX, not the raw age value (a raw
-  // number is read as an index straight into the (usually much shorter) category list,
-  // producing wildly out-of-range pixels).
-  const ageToIdx = (ages, age) => {
-    const exact = ages.indexOf(age);
-    if (exact >= 0) return exact;
-    let lo = -1, hi = -1;
-    for (let k = 0; k < ages.length; k++) {
-      if (ages[k] < age) lo = k;
-      if (ages[k] > age && hi < 0) hi = k;
-    }
-    if (lo >= 0 && hi >= 0) return lo + (age - ages[lo]) / (ages[hi] - ages[lo]);
-    return lo >= 0 ? lo : (hi >= 0 ? hi : 0);
-  };
   // Re-entrancy guard: setOption inside a 'finished' handler triggers ANOTHER 'finished'
   // event -- skip re-applying when nothing actually moved, so this doesn't loop forever.
   let lastKey = null;
-  // syncing (2026-09-07): the box-measurement pass below (see boxPlacements comment)
-  // calls `chart.setOption` MID-FUNCTION to paint boxes before their real size can be
-  // read back -- that call fires ITS OWN 'finished' event, re-entering sync() from
-  // scratch before this outer call ever reaches the lastKey check at the bottom (that
-  // check only guards the FINAL setOption, not this one). Left unguarded, the nested
-  // call's own final setOption would win, then the outer call's stale final setOption
-  // would immediately overwrite it with numbers computed from its own earlier read --
-  // observed live as box sizes appearing to change (103->111px) between two setOption
-  // calls in the same tick. A simple boolean guards the whole function.
-  let syncing = false;
   const sync = () => {
-    if (syncing) return;
-    syncing = true;
-    try { syncBody(); } finally { syncing = false; }
-  };
-  const syncBody = () => {
     let gridRect;
     try { gridRect = chart.getModel().getComponent('grid').coordinateSystem.getRect(); }
     catch (e) { return; } // grid not ready yet -- 'finished' will fire again once it is
@@ -2009,36 +2110,6 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         if (px < gridLeft || px > gridRight) return null; // off-screen (zoomed/panned)
         return { c, px, py: Math.max(gridTop + 4, Math.min(gridBottom - 4, py)) };
       }).filter(Boolean).sort((a, b) => a.px - b.px);
-      // QUARTERS/quarterOn (used by the leader-line pass below, after real box rects are
-      // known) -- hoisted out of the per-callout loop since neither depends on `i`.
-      // The segment lands on a QUARTER MARK of the edge it meets -- 1/4, 2/4 or 3/4 along
-      // the bottom edge when the box sits over the age line, or of the near side edge when
-      // the space-search pushed the box off to one side ("เส้นควรไปชนกับกึ่งกลาง...หรือ 1/4,
-      // 2/4, 3/4"). The quarter nearest the incoming direction is chosen, so the join reads
-      // as deliberate rather than wherever the geometry fell (2026-09-05, per user).
-      const QUARTERS = [0.25, 0.5, 0.75];
-      const quarterOn = (start, size, target) => {
-        let best = QUARTERS[1], bestD = Infinity;
-        QUARTERS.forEach(q => { const d = Math.abs(start + size * q - target); if (d < bestD) { bestD = d; best = q; } });
-        return start + size * best;
-      };
-      // boxPlacements (2026-09-07, per user: "ผมงงว่าทำไมเส้นปะไม่ลากไปชน call out มันมีช่องว่าง
-      // ก่อนถึง call out" -- measured, confirmed on every callout in this chart, not just
-      // ครบสัญญา: a consistent 6-8px gap between the leader's end and the box's real right
-      // edge, growing more visible the longer the diagonal segment is (127px on ครบสัญญา,
-      // barely noticeable at 18px elsewhere -- same bug everywhere, just easier to see on
-      // one box than another, exactly the "logic must be identical, not per-chart" concern
-      // raised the same day). Root cause: `measureBlockWidth`'s own canvas
-      // `ctx.measureText()` and ECharts' internal text-layout engine do not agree on this
-      // Prompt-font string's width (measured 91px vs the box's real painted 83px) -- a
-      // rendering-engine mismatch no amount of retuning the estimate can close for good,
-      // since it isn't wrong by a fixed ratio. Rather than chase another estimate, this now
-      // measures the ACTUAL painted box: boxes are pushed and painted FIRST (one
-      // intermediate setOption, box position/size unaffected by anything below), their
-      // real on-screen rects are read back from the scene graph, and THAT is what the
-      // leader-line pass aims at -- so the endpoint can only ever be wrong by sub-pixel
-      // rounding, never by a font-metric disagreement.
-      const boxPlacements = [];
       resolved.forEach(({ c, px, py: anchorY }, i) => {
         // 2026-09-05: +BOX_MARGIN on each axis. The collision math runs on a computed
         // box size while the rendered box is a little larger (1.5px border each side,
@@ -2201,11 +2272,85 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         // อายุ X" milestone actually is. Same dashed visual language as the exact-tick
         // milestones' own markLines, so the two read as one family.
         //
-        // Box is pushed here, now, with a `name` -- the leader-line pass right after this
-        // loop reads its REAL painted size back via that name (see boxPlacements comment
-        // above) rather than re-estimating it.
-        boxPlacements.push({ c, px, anchorY, boxLeft, boxTop, boxHeight, boxBottom, i });
-        elements.push({ type: 'text', z: 100, z2: 500 + i, silent: false, cursor: 'default',
+        // Drawn as an L: straight up the age line from the axis to the box's own vertical
+        // level, then a short horizontal hop to the box if the space-search placed it off
+        // to one side. `anchorY` (interpolated) still drives WHERE the box goes -- pure
+        // layout, no number claimed by it.
+        // 2026-09-05, per user (items 3 + 4): the leader used to be an L -- straight up
+        // the age line, then a HORIZONTAL hop at the box's own bottom edge. That hop ran
+        // along a constant y, which is exactly where a flat DB/SA line lives, so it
+        // disappeared into that line ("ไม่ควรลากไปบนแนวเส้น DB ควรขยับให้เห็น"). Replaced
+        // with a knee a little below the box and a single sloped segment from there to
+        // the box, so the leader always has vertical extent and never traces a data line.
+        //
+        // The segment lands on a QUARTER MARK of the edge it meets -- 1/4, 2/4 or 3/4
+        // along the bottom edge when the box sits over the age line, or of the near side
+        // edge when the space-search pushed the box off to one side ("เส้นควรไปชนกับ
+        // กึ่งกลาง...หรือ 1/4, 2/4, 3/4"). The quarter nearest the incoming direction is
+        // chosen, so the join reads as deliberate rather than wherever the geometry fell.
+        const QUARTERS = [0.25, 0.5, 0.75];
+        const quarterOn = (start, size, target) => {
+          let best = QUARTERS[1], bestD = Infinity;
+          QUARTERS.forEach(q => { const d = Math.abs(start + size * q - target); if (d < bestD) { bestD = d; best = q; } });
+          return start + size * best;
+        };
+        // 2026-09-07, per user ("กลับไปวิธีเดิม" -- after the real-painted-size approach in
+        // 88ee845 introduced a visible flash/delay on first render, since it needs an
+        // intermediate setOption+repaint to measure the box before the leader can be
+        // drawn): back to a single pass. `measureBlockWidth`'s canvas measureText can
+        // disagree with ECharts' own text layout by a few px on some strings (up to ~8px
+        // observed on one long Thai label) -- an accepted, mostly-invisible trade-off
+        // against a leader that's guaranteed to draw in the SAME frame the box does,
+        // every time, with no extra render pass and no re-entrancy risk.
+        const drawWidth = measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2;
+        const drawRight = boxLeft + drawWidth;
+        const drawBottom = boxTop + boxHeight - BOX_MARGIN;
+        const kneeY = Math.min(gridBottom - 4, drawBottom + 14);
+        let attachX, attachY;
+        if (px >= boxLeft && px <= drawRight) {
+          // 2026-09-05, per user ("ทำไมบางเส้นที่ลากขึ้นไปตรงๆ แล้วปลายต้องงอด้วย ทำไมไม่
+          // ตรงไปเลย"): when the box sits over the age line the leader has no reason to
+          // bend at all -- it was only kinking because the join was being snapped to the
+          // nearest quarter mark, which rarely lands exactly on the age. The quarter rule
+          // was asked for so the join reads as deliberate rather than arbitrary, and a
+          // straight line rising to the box directly above its own age is the most
+          // deliberate join there is, so this case now attaches straight at the age.
+          // Quarter snapping stays for the side case below, where the segment has to
+          // slope anyway. The inset keeps the join off the box's rounded corners.
+          attachY = drawBottom;
+          attachX = Math.max(boxLeft + 12, Math.min(drawRight - 12, px));
+        } else {
+          attachX = px < boxLeft ? boxLeft : drawRight;
+          attachY = quarterOn(boxTop, drawBottom - boxTop, kneeY);
+        }
+        // 2026-09-05, per user ("IFW-R ดูเหมือนเส้นปะลากไม่เชื่อมเข้า call out"): measured, the
+        // ครบสัญญา leader was ending 15.6px clear of its box. Rather than keep chasing which
+        // branch computed the join from a stale rectangle, pin the result: the join is
+        // clamped onto the drawn box, so a leader can only ever finish ON the border.
+        attachX = Math.max(boxLeft, Math.min(drawRight, attachX));
+        attachY = Math.max(boxTop, Math.min(drawBottom, attachY));
+        // z2 well below every box's own (see baseZ2 below) -- per user item 5, a callout
+        // must sit ON TOP of any leader that happens to pass through it, including
+        // another callout's.
+        // 2026-09-05, per user: leader weight 1 -> 1.25. 2026-09-07: 1.25 -> 1.5 and
+        // opacity 0.75 -> 0.9 -- the plan's own color at 1.25px anti-aliased into
+        // near-invisibility on a real display measured at devicePixelRatio 1.25 (a
+        // common Windows 125% scaling value), which zooming the browser in or out would
+        // reveal or hide by changing how many device pixels the stroke covers.
+        const legStyle = { stroke: c.color, lineWidth: 1.5, lineDash: [3, 3], opacity: 0.9 };
+        if (Math.abs(attachX - px) < 0.5) {
+          // Straight shot from the axis to the box -- drawn as ONE segment so the dash
+          // pattern runs continuously instead of restarting at the (invisible) knee.
+          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+            shape: { x1: px, y1: gridBottom, x2: px, y2: attachY }, style: legStyle });
+        } else {
+          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+            shape: { x1: px, y1: gridBottom, x2: px, y2: kneeY }, style: legStyle });
+          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
+            shape: { x1: px, y1: kneeY, x2: attachX, y2: attachY }, style: legStyle });
+        }
+        const baseZ2 = 500 + i; // above every leader line (z2 10+i), per user item 5
+        elements.push({ type: 'text', z: 100, z2: baseZ2, silent: false, cursor: 'default',
         // 2026-09-05: position by the box's LEFT edge, not its centre. `style.align`
         // only centres the TEXT INSIDE the box -- the graphic element's own `left` is
         // still its bounding-box left edge, so passing the centre x here shifted every
@@ -2214,123 +2359,13 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         // left of 603). boxLeft is what the collision/clamp math produced, so use it.
           left: boxLeft, top: boxTop,
           onmouseover: function () { this.attr({ z: 300, z2: 900 }); },
-          onmouseout: function () { this.attr({ z: 100, z2: 500 + i }); },
+          onmouseout: function () { this.attr({ z: 100, z2: baseZ2 }); },
           style: { text: c.text, fontSize: c.fontSize, fontFamily: 'Prompt', fontWeight: 'normal',
             lineHeight: c.lineHeight, align: 'center', verticalAlign: 'top',
             padding: c.padding, backgroundColor: dark ? '#1B2027' : '#FFFFFF',
             borderColor: c.color, borderWidth: 1.5, borderRadius: 10,
             fill: dark ? '#E5E0D8' : '#2B2620' } });
       });
-      // Paint the boxes now (bracket elements, if any, are already in `elements` too) so
-      // their REAL rects exist in the scene graph to measure -- see boxPlacements comment.
-      if (boxPlacements.length) {
-        // 2026-09-07, per user ("เปิดมาครั้งแรกเส้นประก็หายเลย"): this intermediate
-        // setOption/getZr sequence is new, unproven code running inside the SAME function
-        // that must still reach its own FINAL setOption below no matter what -- if
-        // anything in this measurement step throws (observed as a real risk: the very
-        // first sync() a chart instance ever runs has no prior render pass to warm up
-        // against), an uncaught error here aborts the whole syncBody() call, and the
-        // chart is left frozen on whatever the LAST setOption happened to be. On a
-        // chart's first-ever sync that is nothing at all -- not even the box-only
-        // intermediate state, since this code runs before boxes are drawn a second time
-        // -- explaining leaders (and only leaders) being completely absent. Wrapped so a
-        // measurement failure degrades to the pre-real-size estimate for every box
-        // (still draws a leader, just with the old up-to-8px tolerance) rather than
-        // skipping the final setOption entirely.
-        let realSize = {};
-        try {
-          chart.setOption({ graphic: elements }, { replaceMerge: ['graphic'] });
-          // A graphic 'text' element with backgroundColor/borderColor isn't itself a leaf
-          // in the scene graph -- zrender decomposes it into a child `rect` (the visible
-          // border/fill) plus one `tspan` per line, all under an internal `text`-type
-          // parent. `name` does NOT propagate down to those children (confirmed live:
-          // none of them carried the name set above), but `z2` DOES, so the background
-          // rect for box i is found by z2 alone -- its own shape.width/height is exactly
-          // the drawn box size, no transform/getBoundingRect juggling needed.
-          chart.getZr().storage.getDisplayList(true).forEach(el => {
-            if (el.type === 'rect' && el.z2 != null && el.z2 >= 500) {
-              realSize[el.z2 - 500] = { width: el.shape.width, height: el.shape.height };
-            }
-          });
-        } catch (e) { realSize = {}; }
-        boxPlacements.forEach(({ c, px, anchorY, boxLeft, boxTop, boxHeight, boxBottom, i }) => {
-          try {
-          const BOX_MARGIN = 8;
-          // Real painted size when available; falls back to the pre-paint estimate (minus
-          // the collision-only BOX_MARGIN/90px-floor inflation) if the lookup missed this
-          // box OR came back as 0x0 -- confirmed live (2026-09-07, "เปิดมาครั้งแรกเส้นประก็
-          // หาย"): on the very FIRST sync() a chart instance ever runs (no prior render
-          // pass to warm up ECharts' text-layout engine), the just-created rect's
-          // shape.width/height can still read 0 immediately after the intermediate
-          // setOption -- truthy object, zero size, which silently produced a
-          // zero-length/collapsed leader instead of falling back. `> 0` catches that;
-          // every later sync() (resize, dataZoom, switching plans) has already warmed up
-          // and measures correctly on the first try.
-          const real = realSize[i] && realSize[i].width > 0 ? realSize[i] : null;
-          const drawWidth = real ? real.width : Math.max(measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2, boxHeight - BOX_MARGIN);
-          const drawHeight = real ? real.height : boxHeight - BOX_MARGIN;
-          const drawRight = boxLeft + drawWidth;
-          const drawBottom = boxTop + drawHeight;
-          const kneeY = Math.min(gridBottom - 4, drawBottom + 14);
-          let attachX, attachY;
-          if (px >= boxLeft && px <= drawRight) {
-            // 2026-09-05, per user ("ทำไมบางเส้นที่ลากขึ้นไปตรงๆ แล้วปลายต้องงอด้วย ทำไมไม่
-            // ตรงไปเลย"): when the box sits over the age line the leader has no reason to
-            // bend at all. A straight line rising to the box directly above its own age is
-            // the most deliberate join there is.
-            attachY = drawBottom;
-            attachX = Math.max(boxLeft + 12, Math.min(drawRight - 12, px));
-          } else {
-            attachX = px < boxLeft ? boxLeft : drawRight;
-            attachY = quarterOn(boxTop, drawBottom - boxTop, kneeY);
-          }
-          // Clamped onto the REAL drawn box -- a leader can only ever finish ON the border
-          // the reader can actually see, never past it or short of it.
-          attachX = Math.max(boxLeft, Math.min(drawRight, attachX));
-          attachY = Math.max(boxTop, Math.min(drawBottom, attachY));
-          // 2026-09-07, per user ("เส้นปะยังไม่ขึ้นเหมือนเดิม แต่เวลา zoom เห็นนะ แต่พอ zoom
-          // out ออกมาเป็นปกติเส้นปะก็หายเหมือนเดิม"): pixel-scanned the live canvas -- the
-          // dash IS actually painted (found full-alpha #3a5a8c pixels exactly where
-          // expected), so this isn't a missing-element bug like the first-load race
-          // above. The page's own devicePixelRatio measured 1.25 (a common real-world
-          // Windows 125% display-scaling value neither "1x" nor "2x") -- at that ratio the
-          // OLD 1.25 CSS-px width rasterized to 1.5625 DEVICE px, an ugly non-integer
-          // width zrender/canvas anti-alias by spreading across two device pixels at
-          // partial alpha each, faint enough on the plan's own (often similarly-toned)
-          // color to disappear on some displays, while browser zoom changes how many
-          // device pixels that stroke covers -- exactly the "zoom in reveals it, zoom out
-          // hides it" pattern reported.
-          // 2026-09-07, per user follow-up ("ทำไมคุณไม่แนะนำผมให้ใช้ความหนาที่มันไม่ซับซ้อน
-          // หละ") -- fair: 1.5 was still non-integer (1.5 x 1.25 DPR = 1.875, still not a
-          // whole device pixel) and would have hit the identical class of problem at a
-          // different fractional DPR. A whole number sidesteps the root cause instead of
-          // narrowing it -- 2px rasterizes to a whole number of device pixels at ANY
-          // integer or fractional DPR that itself lands on an integer-ish product (1x,
-          // 1.25x*2=2.5 still not whole, but the anti-alias spread from a 2px base is
-          // already wide enough to stay clearly visible even then, unlike 1.25's ~1px
-          // base). Opacity 0.75->0.9 stays, for the same "same color as the plan, needs
-          // the contrast" reason.
-          const legStyle = { stroke: c.color, lineWidth: 2, lineDash: [3, 3], opacity: 0.9 };
-          if (Math.abs(attachX - px) < 0.5) {
-            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-              shape: { x1: px, y1: gridBottom, x2: px, y2: attachY }, style: legStyle });
-          } else {
-            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-              shape: { x1: px, y1: gridBottom, x2: px, y2: kneeY }, style: legStyle });
-            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-              shape: { x1: px, y1: kneeY, x2: attachX, y2: attachY }, style: legStyle });
-          }
-          } catch (e) {
-            // Same reasoning as the outer try above -- one box's leader math failing
-            // must not blank out every OTHER box's leader (a forEach throw aborts the
-            // whole loop). Falls back to the simplest possible leader: straight up from
-            // the axis to the box's own top, which is always geometrically valid.
-            elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-              shape: { x1: px, y1: gridBottom, x2: px, y2: boxTop },
-              style: { stroke: c.color, lineWidth: 2, lineDash: [3, 3], opacity: 0.9 } });
-          }
-        });
-      }
     }
 
     const key = JSON.stringify(elements.map(e => [e.type, e.left, e.top, e.shape]));
@@ -2627,16 +2662,23 @@ function compareSetOption(container, plans, tickMode, dark) {
       label: { show: i === 0, backgroundColor: dark ? '#2B323B' : '#6b6f66', color: '#fff', fontFamily: 'Prompt, sans-serif', fontSize: 11 } } }));
   const series = [];
   const icons = [];
+  const allDashLines = [];
+  // cashFlowLeadIns per grid, plus that grid's own age list (ageToIdx needs the REAL
+  // tick ages, per plan -- see wireCompareDashedMilestones' leadIns block).
+  const allLeadIns = [];
   const CV_NAME = cvLabel();
   const wrap = (v, planName) => (v === null || v === undefined) ? null : { value: v, planName };
   plansData.forEach((d, i) => {
     const p = d.p, pts = d.pts;
-    const { series: planSeries } = buildCreamSeries(p, pts, { gridIdx: i, wrap: v => wrap(v, p.name), cvName: CV_NAME, dark });
+    const { series: planSeries, compareDashLines, cashFlowLeadIns } = buildCreamSeries(p, pts, { gridIdx: i, wrap: v => wrap(v, p.name), cvName: CV_NAME, dark });
     planSeries.forEach(s => {
       series.push(s);
       if (s.type === 'bar') icons.push({ kind:'bar', color: s.itemStyle.color });
       else icons.push({ kind:'line', dash: (s.lineStyle && s.lineStyle.type) || 'solid', color: s.itemStyle.color });
     });
+    (compareDashLines || []).forEach(dl => allDashLines.push({ ...dl, gridIndex: i }));
+    const ages = pts.map(r => r.age);
+    (cashFlowLeadIns || []).forEach(seg => allLeadIns.push({ ...seg, gridIndex: i, ages }));
   });
   const graphic = plansData.map((d, i) => ({ type: 'text', left: grids[i].left, top: 6, style: { text: d.p.name, fill: d.p.color, fontWeight: 600, fontSize: 13 } }));
   // '__'-prefixed series (e.g. __premium_discount_band) are decorative-only -- hidden
@@ -2650,7 +2692,8 @@ function compareSetOption(container, plans, tickMode, dark) {
     // follow series push order (grouped per plan/grid, stack bottom-to-top within each) instead
     // of being re-sorted by value across all grids.
     tooltip: { trigger: 'axis', formatter: p => axisTooltipFormatter(p.filter(x => !x.seriesName.startsWith('__')), v => fmtBaht(v) + ' บาท', { icons, seriesOnly: true, preserveOrder: true,
-      yearLookup: (gridIdx, dataIdx) => (plansData[gridIdx] && plansData[gridIdx].pts[dataIdx] && plansData[gridIdx].pts[dataIdx].year) || '' }), axisPointer: axisPointerCross(dark), ...tooltipStyle(dark) } };
+      yearLookup: (gridIdx, dataIdx) => (plansData[gridIdx] && plansData[gridIdx].pts[dataIdx] && plansData[gridIdx].pts[dataIdx].year) || '' }), axisPointer: axisPointerCross(dark), ...tooltipStyle(dark) },
+    __compareDashLines: allDashLines, __compareLeadIns: allLeadIns };
 }
 
 const CASH_IN_LABELS_C = Object.fromEntries(CASH_IN_CANDIDATES.map(c2 => [c2.key, c2.label]));
@@ -4431,8 +4474,10 @@ function render() {
       const elc = document.getElementById(`chart-${idx}-${set.id}`);
       if (elc && visiblePlans.length) {
         const inst = echarts.init(elc);
-        inst.setOption(compareSetOption(elc, visiblePlans, effTick, dark));
+        const compareOpt = compareSetOption(elc, visiblePlans, effTick, dark);
+        inst.setOption(compareOpt);
         wireDiscountBandLegendSync(inst);
+        wireCompareDashedMilestones(inst, compareOpt.__compareDashLines, compareOpt.__compareLeadIns, dark);
         echartsInstances.push(inst);
       }
     }
