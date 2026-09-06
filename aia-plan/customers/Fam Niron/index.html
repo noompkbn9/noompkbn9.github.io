@@ -2293,16 +2293,24 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
           // dash IS actually painted (found full-alpha #3a5a8c pixels exactly where
           // expected), so this isn't a missing-element bug like the first-load race
           // above. The page's own devicePixelRatio measured 1.25 (a common real-world
-          // Windows 125% display-scaling value neither "1x" nor "2x") -- at that ratio a
-          // 1.25 CSS-px stroke rasterizes to 1.5625 DEVICE px, an ugly non-integer width
-          // zrender/canvas anti-alias by spreading across two device pixels at partial
-          // alpha each, and at 0.75 opacity on top of that the result can fall below
-          // easy visibility on the plan's own (often similarly-toned) color -- exactly
-          // what turning the BROWSER zoom in or out would reveal or hide, since zoom
-          // changes how many device pixels that stroke covers. Width 1.25->1.5 and
-          // opacity 0.75->0.9 keeps the same dashed "secondary annotation" look while
-          // giving the anti-aliasing enough coverage to stay visible at any zoom/DPR.
-          const legStyle = { stroke: c.color, lineWidth: 1.5, lineDash: [3, 3], opacity: 0.9 };
+          // Windows 125% display-scaling value neither "1x" nor "2x") -- at that ratio the
+          // OLD 1.25 CSS-px width rasterized to 1.5625 DEVICE px, an ugly non-integer
+          // width zrender/canvas anti-alias by spreading across two device pixels at
+          // partial alpha each, faint enough on the plan's own (often similarly-toned)
+          // color to disappear on some displays, while browser zoom changes how many
+          // device pixels that stroke covers -- exactly the "zoom in reveals it, zoom out
+          // hides it" pattern reported.
+          // 2026-09-07, per user follow-up ("ทำไมคุณไม่แนะนำผมให้ใช้ความหนาที่มันไม่ซับซ้อน
+          // หละ") -- fair: 1.5 was still non-integer (1.5 x 1.25 DPR = 1.875, still not a
+          // whole device pixel) and would have hit the identical class of problem at a
+          // different fractional DPR. A whole number sidesteps the root cause instead of
+          // narrowing it -- 2px rasterizes to a whole number of device pixels at ANY
+          // integer or fractional DPR that itself lands on an integer-ish product (1x,
+          // 1.25x*2=2.5 still not whole, but the anti-alias spread from a 2px base is
+          // already wide enough to stay clearly visible even then, unlike 1.25's ~1px
+          // base). Opacity 0.75->0.9 stays, for the same "same color as the plan, needs
+          // the contrast" reason.
+          const legStyle = { stroke: c.color, lineWidth: 2, lineDash: [3, 3], opacity: 0.9 };
           if (Math.abs(attachX - px) < 0.5) {
             elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
               shape: { x1: px, y1: gridBottom, x2: px, y2: attachY }, style: legStyle });
@@ -2319,7 +2327,7 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
             // the axis to the box's own top, which is always geometrically valid.
             elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
               shape: { x1: px, y1: gridBottom, x2: px, y2: boxTop },
-              style: { stroke: c.color, lineWidth: 1.5, lineDash: [3, 3], opacity: 0.9 } });
+              style: { stroke: c.color, lineWidth: 2, lineDash: [3, 3], opacity: 0.9 } });
           }
         });
       }
