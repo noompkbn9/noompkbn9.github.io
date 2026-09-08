@@ -2983,8 +2983,15 @@ function cashflowChartOption(plans, tick, dark, st) {
     const terminalBenefitKey = isCiFamily ? 'death_benefit' : 'surrender_value';
     const breakdown = buildCashflowSeriesBreakdownJS(byYear, uptoYear, terminalBenefitKey, recurringKeys, { ...cfOpts, seedPrefix: plan.name }, ciAddonKeys, excludedPprKeys);
     const idxs = tickIndices(plan, tick);
-    const ages = idxs.map(i => plan.series[i].age);
-    const years = idxs.map(i => plan.series[i].year);
+    // extendPtsToMaturity (2026-09-09, per user: "79, 98 หมายถึงให้แสดงบนกราฟด้วย ถ้าเกิดสัญญา
+    // สิ้นสุดก่อนก็ให้แสดงด้วย") -- a plan that lapses before its designed contract term used
+    // to stop this chart's age axis dead at the real lapse age, so the contract's own designed
+    // end age never appeared. Pads with real zero rows out to plan.maturity_age (a no-op for
+    // any plan that isn't lapsed early -- see the function's own guard), same padding
+    // planChartOption's milestone-illustration chart already uses.
+    const extPts = extendPtsToMaturity(plan, idxs.map(i => plan.series[i]), tick);
+    const ages = extPts.map(p => p.age);
+    const years = extPts.map(p => p.year);
     const pick = arr => years.map((y, k) => arr[y - 1] || 0);
     const cashInByKey = Object.fromEntries(Object.entries(breakdown.cashInByKey).map(([k, arr]) => [k, pick(arr)]));
     const terminal = pick(breakdown.terminalByYear);
@@ -3241,8 +3248,14 @@ function irrChartOption(plans, tick, dark, opts = {}) {
   // visible plan's own tick ages. Each plan's age->row lookup is built from its FULL
   // series (not just its own tick subset), so a shared-axis age this plan doesn't happen
   // to tick on its own can still resolve to that plan's real row at that age.
+  // extendPtsToMaturity (2026-09-09, per user: "79, 98 หมายถึงให้แสดงบนกราฟด้วย ถ้าเกิดสัญญา
+  // สิ้นสุดก่อนก็ให้แสดงด้วย") -- same maturity-age padding as cashflowChartOption above (a
+  // no-op for a plan that isn't lapsed early), so a lapsed plan's designed contract-end age
+  // still lands on this chart's shared axis even though no real IRR exists to plot there
+  // (planAgeMaps below has no row at a padded age, so that plan's own line simply stops
+  // before it -- only the axis category/tick is added, nothing is fabricated).
   const ageSet = new Set();
-  plans.forEach(p => tickIndices(p, tick).forEach(i => ageSet.add(p.series[i].age)));
+  plans.forEach(p => extendPtsToMaturity(p, tickIndices(p, tick).map(i => p.series[i]), tick).forEach(r => ageSet.add(r.age)));
   const ages = Array.from(ageSet).sort((a, b) => a - b);
   const planAgeMaps = plans.map(p => {
     const map = new Map();
@@ -4686,9 +4699,21 @@ function render() {
                 <th class="text-right px-4 py-2 border-b-2 text-xs muted" style="border-color:${'var(--cream-text)'}">มรดกส่งต่อ (DB)</th>
                 <th class="text-right px-4 py-2 border-b-2 text-xs muted" style="border-color:${'var(--cream-text)'}">${cvLabel(indivPlan.name)}</th>
               </tr></thead>
-              <tbody>${tickIndices(indivPlan,indivEffTick).map(i => {
-                const r = indivPlan.series[i];
-                const isLast = i === indivPlan.series.length - 1;
+              <tbody>${(() => {
+                // extendPtsToMaturity (2026-09-09, per user: "49 79 ควรจะมีเหมือนเดิม ยกเว้น
+                // ข้อมูลอื่นอะ") -- a lapsed plan's designed maturity age still gets its own
+                // row (year/age are real, computed the same way as any other row -- see the
+                // function's own zeroRow), but every OTHER column collapses into one muted
+                // dash cell instead of repeating fabricated-looking zeros in each column.
+                const indivIdxs = tickIndices(indivPlan, indivEffTick);
+                return extendPtsToMaturity(indivPlan, indivIdxs.map(i => indivPlan.series[i]), indivEffTick);
+              })().map((r, ri, arr) => {
+                const isLast = ri === arr.length - 1;
+                if (r.lapsePad) {
+                  return `<tr><td class="text-left px-4 py-2 border-b hairline">${r.year}</td>
+                  <td class="text-left px-4 py-2 border-b hairline" title="สัญญานี้ออกแบบให้ความคุ้มครองถึงอายุนี้ &mdash; สิ้นผลบังคับ (หมดมูลค่า) ไปแล้วที่อายุ ${indivPlan.lapse_age} ปี">${r.age}</td>
+                  <td colspan="${indivHasDiscountCol ? 6 : 4}" class="text-center px-4 py-2 border-b hairline muted text-xs">&mdash; ไม่มีข้อมูล (สิ้นผลบังคับไปแล้วที่อายุ ${indivPlan.lapse_age} ปี)</td></tr>`;
+                }
                 // 2026-09-05, per user ("ให้แสดงข้อมูล DB CV รวบกับ IRR เหมือนหน้าเปรียบเทียบ
                 // เลย โดยถ้ามี mile stone ก็ใส่ icon"): IRR and its amount were separate
                 // columns here while the compare table already pairs them in one cell
