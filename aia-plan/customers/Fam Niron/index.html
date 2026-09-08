@@ -1907,6 +1907,47 @@ function measureTextWidth(text, fontSize, fontFamily) {
 function measureBlockWidth(text, fontSize, fontFamily) {
   return Math.max(...String(text).split('\n').map(l => measureTextWidth(l, fontSize, fontFamily)));
 }
+// 2026-09-08, per user ("เส้นปะมันวิ่งไปไม่ถึง call out และ padding ด้านขวาของ call out ก็ไม่มี"):
+// measured live that measureBlockWidth's canvas estimate can be LARGER than ECharts' real
+// rendered box, not just smaller -- the opposite direction from the ~8px underestimate this
+// file's leader-attach clamp was tuned against on 2026-09-07/08. Since the sign of the error
+// isn't consistent (it depends on the specific text/glyph mix), no fixed slop constant can
+// ever get this right for every callout. This function is shared by wireChartOverlaysSync's
+// initial (estimate-based) paint AND its post-paint correction pass (which re-runs this same
+// geometry against the REAL rendered box, read back via getBoundingRect() once ECharts has
+// actually painted it) -- see the `requestAnimationFrame` call near the callout loop below.
+function computeCalloutLeaderGeometry(boxLeft, boxTop, boxRight, boxBottom, px, gridBottom) {
+  const QUARTERS = [0.25, 0.5, 0.75];
+  const quarterOn = (start, size, target) => {
+    let best = QUARTERS[1], bestD = Infinity;
+    QUARTERS.forEach(q => { const d = Math.abs(start + size * q - target); if (d < bestD) { bestD = d; best = q; } });
+    return start + size * best;
+  };
+  const kneeY = Math.min(gridBottom - 4, boxBottom + 14);
+  let attachX, attachY;
+  if (px >= boxLeft && px <= boxRight) {
+    attachY = boxBottom;
+    attachX = Math.max(boxLeft + 12, Math.min(boxRight - 12, px));
+  } else {
+    attachX = px < boxLeft ? boxLeft : boxRight;
+    attachY = quarterOn(boxTop, boxBottom - boxTop, kneeY);
+  }
+  attachX = Math.max(boxLeft, Math.min(boxRight, attachX));
+  attachY = Math.max(boxTop, Math.min(boxBottom, attachY));
+  // Always exactly 2 segments so the initial (estimate) and corrected (real) passes can
+  // update the SAME two graphic-element ids regardless of which branch each pass takes --
+  // the straight case's 2nd segment is just a degenerate zero-length line at the join.
+  if (Math.abs(attachX - px) < 0.5) {
+    return { segments: [
+      { x1: px, y1: gridBottom, x2: px, y2: attachY },
+      { x1: attachX, y1: attachY, x2: attachX, y2: attachY },
+    ] };
+  }
+  return { segments: [
+    { x1: px, y1: gridBottom, x2: px, y2: kneeY },
+    { x1: px, y1: kneeY, x2: attachX, y2: attachY },
+  ] };
+}
 // Category axis: convertToPixel needs the tick's INDEX, not the raw age value (a raw
 // number is read as an index straight into the (usually much shorter) category list,
 // producing wildly out-of-range pixels). Returns a genuine fraction when `age` falls
@@ -2068,6 +2109,10 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
   // Re-entrancy guard: setOption inside a 'finished' handler triggers ANOTHER 'finished'
   // event -- skip re-applying when nothing actually moved, so this doesn't loop forever.
   let lastKey = null;
+  // Bumped every time sync() actually redraws; lets the post-paint callout-leader
+  // correction pass (scheduled via requestAnimationFrame below) detect a newer sync() ran
+  // in the meantime and bail out instead of patching leaders against stale positions.
+  let renderGen = 0;
   const sync = () => {
     let gridRect;
     try { gridRect = chart.getModel().getComponent('grid').coordinateSystem.getRect(); }
@@ -2075,6 +2120,9 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
     const gridLeft = gridRect.x, gridRight = gridRect.x + gridRect.width;
     const gridTop = gridRect.y, gridBottom = gridRect.y + gridRect.height;
     const elements = [];
+    // Filled in by the floating-callout branch below; consumed by the post-paint
+    // leader-correction pass after this sync() actually redraws (see near chart.setOption).
+    const calloutCorrections = [];
 
     // Cash-flow lead-in (2026-09-07, per user): draw the part of a Net-Cash-In stream that
     // begins between two ticks. The series itself can only start on a category, so without
@@ -2426,52 +2474,20 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         // with a knee a little below the box and a single sloped segment from there to
         // the box, so the leader always has vertical extent and never traces a data line.
         //
-        // The segment lands on a QUARTER MARK of the edge it meets -- 1/4, 2/4 or 3/4
-        // along the bottom edge when the box sits over the age line, or of the near side
-        // edge when the space-search pushed the box off to one side ("เส้นควรไปชนกับ
-        // กึ่งกลาง...หรือ 1/4, 2/4, 3/4"). The quarter nearest the incoming direction is
-        // chosen, so the join reads as deliberate rather than wherever the geometry fell.
-        const QUARTERS = [0.25, 0.5, 0.75];
-        const quarterOn = (start, size, target) => {
-          let best = QUARTERS[1], bestD = Infinity;
-          QUARTERS.forEach(q => { const d = Math.abs(start + size * q - target); if (d < bestD) { bestD = d; best = q; } });
-          return start + size * best;
-        };
         // 2026-09-07, per user ("กลับไปวิธีเดิม" -- after the real-painted-size approach in
         // 88ee845 introduced a visible flash/delay on first render, since it needs an
         // intermediate setOption+repaint to measure the box before the leader can be
-        // drawn): back to a single pass. `measureBlockWidth`'s canvas measureText can
-        // disagree with ECharts' own text layout by a few px on some strings (up to ~8px
-        // observed on one long Thai label) -- an accepted, mostly-invisible trade-off
-        // against a leader that's guaranteed to draw in the SAME frame the box does,
-        // every time, with no extra render pass and no re-entrancy risk.
-        const drawWidth = measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2;
-        const drawRight = boxLeft + drawWidth;
-        const drawBottom = boxTop + boxHeight - BOX_MARGIN;
-        const kneeY = Math.min(gridBottom - 4, drawBottom + 14);
-        let attachX, attachY;
-        if (px >= boxLeft && px <= drawRight) {
-          // 2026-09-05, per user ("ทำไมบางเส้นที่ลากขึ้นไปตรงๆ แล้วปลายต้องงอด้วย ทำไมไม่
-          // ตรงไปเลย"): when the box sits over the age line the leader has no reason to
-          // bend at all -- it was only kinking because the join was being snapped to the
-          // nearest quarter mark, which rarely lands exactly on the age. The quarter rule
-          // was asked for so the join reads as deliberate rather than arbitrary, and a
-          // straight line rising to the box directly above its own age is the most
-          // deliberate join there is, so this case now attaches straight at the age.
-          // Quarter snapping stays for the side case below, where the segment has to
-          // slope anyway. The inset keeps the join off the box's rounded corners.
-          attachY = drawBottom;
-          attachX = Math.max(boxLeft + 12, Math.min(drawRight - 12, px));
-        } else {
-          attachX = px < boxLeft ? boxLeft : drawRight;
-          attachY = quarterOn(boxTop, drawBottom - boxTop, kneeY);
-        }
-        // 2026-09-05, per user ("IFW-R ดูเหมือนเส้นปะลากไม่เชื่อมเข้า call out"): measured, the
-        // ครบสัญญา leader was ending 15.6px clear of its box. Rather than keep chasing which
-        // branch computed the join from a stale rectangle, pin the result: the join is
-        // clamped onto the drawn box, so a leader can only ever finish ON the border.
-        attachX = Math.max(boxLeft, Math.min(drawRight, attachX));
-        attachY = Math.max(boxTop, Math.min(drawBottom, attachY));
+        // drawn): back to a single pass for the INITIAL paint. Historical note (kept: two
+        // slop constants were tried and both regressed -- see git history on this block for
+        // 2026-09-08's ESTIMATE_SLOP attempts): `measureBlockWidth`'s canvas estimate can
+        // disagree with ECharts' real rendered box in EITHER direction depending on the
+        // text/glyph mix (confirmed live: it overestimated a "ครบสัญญา (อายุ 98)"-style box
+        // by ~10px, the opposite of the ~8px UNDERestimate other labels hit) -- no fixed
+        // offset can ever be correct for every callout. Kept only as a same-frame ESTIMATE
+        // for the FIRST paint (never visibly wrong for long, see the correction pass below).
+        const ESTIMATE_SLOP = 4;
+        const estRight = boxLeft + measureBlockWidth(c.text, c.fontSize) + (c.padding[1] || 8) * 2 + ESTIMATE_SLOP;
+        const estBottom = boxTop + boxHeight - BOX_MARGIN + ESTIMATE_SLOP;
         // z2 well below every box's own (see baseZ2 below) -- per user item 5, a callout
         // must sit ON TOP of any leader that happens to pass through it, including
         // another callout's.
@@ -2481,19 +2497,28 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
         // common Windows 125% scaling value), which zooming the browser in or out would
         // reveal or hide by changing how many device pixels the stroke covers.
         const legStyle = { stroke: c.color, lineWidth: 1.5, lineDash: [3, 3], opacity: 0.9 };
-        if (Math.abs(attachX - px) < 0.5) {
-          // Straight shot from the axis to the box -- drawn as ONE segment so the dash
-          // pattern runs continuously instead of restarting at the (invisible) knee.
-          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-            shape: { x1: px, y1: gridBottom, x2: px, y2: attachY }, style: legStyle });
-        } else {
-          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-            shape: { x1: px, y1: gridBottom, x2: px, y2: kneeY }, style: legStyle });
-          elements.push({ type: 'line', z: 100, z2: 10 + i, silent: true,
-            shape: { x1: px, y1: kneeY, x2: attachX, y2: attachY }, style: legStyle });
-        }
+        const leaderId0 = `callout-leader-${i}-0`, leaderId1 = `callout-leader-${i}-1`;
+        const initialGeo = computeCalloutLeaderGeometry(boxLeft, boxTop, estRight, estBottom, px, gridBottom);
+        elements.push({ type: 'line', id: leaderId0, z: 100, z2: 10 + i, silent: true,
+          shape: initialGeo.segments[0], style: legStyle });
+        elements.push({ type: 'line', id: leaderId1, z: 100, z2: 10 + i, silent: true,
+          shape: initialGeo.segments[1], style: legStyle });
+        // 2026-09-08, per user ("เส้นปะมันวิ่งไปไม่ถึง call out และ padding ด้านขวาของ call
+        // out ก็ไม่มี"): since the ESTIMATE above can be wrong in either direction (see note
+        // above), don't try to guess it more precisely -- correct it after the fact instead.
+        // Once ECharts has actually painted this box (next animation frame), read back its
+        // REAL rect via getBoundingRect() and recompute the SAME leader geometry against
+        // that real rect, then patch just these two line ids (by `id`, no replaceMerge, so
+        // nothing else this function drew is touched). This is deliberately NOT the reverted
+        // 88ee845 approach: that one measured the box BEFORE drawing the leader (an extra
+        // setOption+repaint gating the very first paint, causing the visible flash that got
+        // it reverted); this one draws an immediate best-guess leader every time, then
+        // silently nudges it onto the real border a frame later -- no gating, no flash risk,
+        // since the callout box's own position never changes, only its attached leader.
+        const calloutTextId = `callout-text-${i}`;
+        calloutCorrections.push({ textId: calloutTextId, leaderIds: [leaderId0, leaderId1], px });
         const baseZ2 = 500 + i; // above every leader line (z2 10+i), per user item 5
-        elements.push({ type: 'text', z: 100, z2: baseZ2, silent: false, cursor: 'default',
+        elements.push({ type: 'text', id: calloutTextId, z: 100, z2: baseZ2, silent: false, cursor: 'default',
         // 2026-09-05: position by the box's LEFT edge, not its centre. `style.align`
         // only centres the TEXT INSIDE the box -- the graphic element's own `left` is
         // still its bounding-box left edge, so passing the centre x here shifted every
@@ -2515,6 +2540,53 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
     if (key === lastKey) return;
     lastKey = key;
     chart.setOption({ graphic: elements }, { replaceMerge: ['graphic'] });
+    // Post-paint callout-leader correction (2026-09-08, per user -- see the long comment at
+    // the leader-geometry call site above for why this exists): read back each callout box's
+    // REAL rendered rect one frame after ECharts actually paints it, then patch just the two
+    // leader-line SHAPES with geometry recomputed against that real rect. `myGen` guards
+    // against a newer sync() having already re-drawn everything by the time this frame runs
+    // (e.g. a rapid resize/zoom) -- in that case the newer sync() scheduled its own
+    // correction, so this stale one bails out rather than patching against now-wrong
+    // positions.
+    //
+    // Mutates the zrender Displayable elements directly via `.attr()` instead of going back
+    // through `chart.setOption({graphic: ...})` -- confirmed live that setOption with a
+    // partial `graphic` ARRAY (the shorthand form this whole function uses) REPLACES the
+    // entire elements list with whatever's passed, not an id-keyed upsert into the existing
+    // list, silently deleting every callout box and bracket label this function had drawn.
+    // `.attr()` on the already-live elements found via the display list only repaints those
+    // two shapes and leaves everything else -- including the option model -- untouched.
+    if (calloutCorrections.length) {
+      const myGen = ++renderGen;
+      // setTimeout, not requestAnimationFrame (2026-09-08): confirmed live that rAF callbacks
+      // scheduled here never ran at all in a background/non-visible tab (Chromium pauses rAF
+      // for pages not actually being painted to screen) -- this correction has to run
+      // regardless of tab visibility, and a few ms of extra delay on a foreground tab is
+      // imperceptible, so there's no real reason to prefer rAF's "next paint" semantics here.
+      setTimeout(() => {
+        if (renderGen !== myGen) return;
+        const zr = chart.getZr && chart.getZr();
+        if (!zr) return;
+        // 2026-09-08: `zr.storage.getDisplayList(true)` confirmed live to silently omit these
+        // text elements (found the leader lines fine, never the text) -- reason unconfirmed,
+        // possibly an internal render-list optimization specific to bordered/background text.
+        // `traverse()` walks the full storage tree unconditionally and reliably finds both.
+        const byId = {};
+        zr.storage.traverse(el => { if (el.id) byId[el.id] = el; });
+        calloutCorrections.forEach(({ textId, leaderIds, px }) => {
+          const textEl = byId[textId];
+          if (!textEl) return;
+          let rect;
+          try { rect = textEl.getBoundingRect(); } catch (e) { return; }
+          const realLeft = textEl.x + rect.x, realTop = textEl.y + rect.y;
+          const realRight = realLeft + rect.width, realBottom = realTop + rect.height;
+          const geo = computeCalloutLeaderGeometry(realLeft, realTop, realRight, realBottom, px, gridBottom);
+          const l0 = byId[leaderIds[0]], l1 = byId[leaderIds[1]];
+          if (l0) l0.attr({ shape: geo.segments[0] });
+          if (l1) l1.attr({ shape: geo.segments[1] });
+        });
+      }, 32);
+    }
   };
   chart.on('finished', sync);
   chart.on('dataZoom', sync);
@@ -2530,6 +2602,16 @@ function wireChartOverlaysSync(chart, plan, floatingCallouts, dark, cashFlowLead
   if (typeof ResizeObserver !== 'undefined' && chart.getDom()) {
     try { new ResizeObserver(() => { lastKey = null; sync(); }).observe(chart.getDom()); }
     catch (e) { /* observer unavailable -- resize just keeps the previous positions */ }
+  }
+  // Font-load race (2026-09-08, per user): measureTextWidth/measureBlockWidth call
+  // canvas.measureText() against the "Prompt" font the first time sync() runs, on this
+  // chart's first 'finished' event. If Prompt hasn't finished loading by then, that measures
+  // fallback-font metrics while ECharts paints the actual box with Prompt's real ones --
+  // wrong until the next zoom/resize happens to re-run sync(). Once fonts are confirmed
+  // ready, force exactly one correction pass; if fonts were already loaded (the common
+  // case) this resolves near-instantly and recomputes identical geometry, no visible flash.
+  if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => { lastKey = null; sync(); });
   }
   // Also run once immediately: setOption computes the grid/coordinate-system layout
   // synchronously (only the visual paint animates), so convertToPixel already works right
@@ -2897,7 +2979,8 @@ function cashflowChartOption(plans, tick, dark, st) {
     // sum_assured field at all, so death_benefit is the only field carrying that max.
     // Reading surrender_value alone here understated the contract-end payout.
     const planCode = (plan.name || '').split('_')[0];
-    const terminalBenefitKey = (planCode === 'CISC' || planCode === 'CIPC') ? 'death_benefit' : 'surrender_value';
+    const isCiFamily = planCode === 'CISC' || planCode === 'CIPC' || planCode === 'CISCP';
+    const terminalBenefitKey = isCiFamily ? 'death_benefit' : 'surrender_value';
     const breakdown = buildCashflowSeriesBreakdownJS(byYear, uptoYear, terminalBenefitKey, recurringKeys, { ...cfOpts, seedPrefix: plan.name }, ciAddonKeys, excludedPprKeys);
     const idxs = tickIndices(plan, tick);
     const ages = idxs.map(i => plan.series[i].age);
@@ -2923,7 +3006,7 @@ function cashflowChartOption(plans, tick, dark, st) {
         + Math.abs(cashOutUdr[k] || 0) + Math.abs(cashOutPpr[k] || 0);
       maxV = Math.max(maxV, cashInTotal, cashOutTotal, cvLine[k] || 0);
     });
-    return { plan, ages, years, cashInByKey, terminal, cashOutRp, cashOutRtu, cashOutAtu, cashOutUdr, cashOutPpr, cvLine };
+    return { plan, ages, years, cashInByKey, terminal, cashOutRp, cashOutRtu, cashOutAtu, cashOutUdr, cashOutPpr, cvLine, isCiFamily };
   });
   // 2026-09-03, per user: "กราฟกระแสเงินสดไม่ต้องแสดงชื่อแกนก็ได้" -- axis name ("อายุ")
   // removed, age is already self-evident from the number labels below the axis.
@@ -2937,7 +3020,11 @@ function cashflowChartOption(plans, tick, dark, st) {
   // weight, per user confirmation (kept real baht values, not a %-of-year normalization,
   // since the point of this chart is comparing real magnitude across years/plans).
   // Same axisLine fix as compareSetOption -- see comment there.
-  const yAxis = plansData.map((d, i) => ({ gridIndex: i, type: 'value', min: -maxV * 1.12, max: maxV * 1.12,
+  // 2026-09-08, per user: bumped 1.12 -> 1.32 -- the terminal callout box (below) sits right
+  // at the tallest bar's height, and 1.12 left too little headroom for its own box height,
+  // clipping it against the grid's top edge. Kept symmetric (both sides) per the existing
+  // equal-visual-weight design intent above.
+  const yAxis = plansData.map((d, i) => ({ gridIndex: i, type: 'value', min: -maxV * 1.32, max: maxV * 1.32,
     axisLine: { show: true, lineStyle: { color: gridColor } },
     axisLabel: { show: i === 0, color: axisColor, fontFamily: FONT, fontSize: 10, formatter: v => (v/1e6).toFixed(1)+'M' },
     splitLine: { show: true, lineStyle: { color: gridColor } } }));
@@ -2973,12 +3060,20 @@ function cashflowChartOption(plans, tick, dark, st) {
       // last x-axis index (the chart's own right edge), so the label must grow LEFTWARD
       // from the pin (position:'left' + align:'right'), never centered/inside -- otherwise
       // half the box renders off-canvas past the right edge.
-      markPoint: (lastIdx >= 0 && d.terminal[lastIdx]) ? { symbol: 'pin', symbolSize: 20,
+      // z: 9 (2026-09-08, per user) -- the CV overlay line below draws at z:6 and was
+      // rendering IN FRONT of this pin/label, cutting the dashed line straight across the
+      // callout box's text. markPoint doesn't inherit its parent series' z, so it needs its
+      // own explicit z higher than every other series in this chart to always stay on top.
+      markPoint: (lastIdx >= 0 && d.terminal[lastIdx]) ? { symbol: 'pin', symbolSize: 20, z: 9,
         data: [{ coord: [lastIdx, d.terminal[lastIdx]], value: '', itemStyle: { color: d.plan.color },
           label: { show: true, formatter: terminalLines, fontSize: 9, fontFamily: FONT,
             color: dark ? '#E5E0D8' : '#2B2620', backgroundColor: dark ? '#1B2027' : '#FFFFFF',
             borderColor: d.plan.color, borderWidth: 1.5, borderRadius: 8, padding: [6, 8],
-            lineHeight: 13, position: 'left', align: 'right', distance: 10 } }] } : undefined });
+            // 2026-09-08, per user: verticalAlign 'top' anchors the BOX'S TOP edge (not its
+            // vertical center) to the pin -- the box now grows downward from the pin instead
+            // of being centered on it, so it stays inside the headroom above instead of half
+            // rendering past the grid's top edge.
+            lineHeight: 13, position: 'left', align: 'right', verticalAlign: 'top', distance: 10 } }] } : undefined });
     // CV line (2026-08-07): NOT part of cfStack -- overlays independently so it never adds
     // into the cash-in/cash-out totals, just answers "what would I get if I exited THIS year
     // instead" at a glance for every year on the chart. Named plainly (no "ถ้าเวนคืนปีนั้น"
@@ -2989,6 +3084,15 @@ function cashflowChartOption(plans, tick, dark, st) {
       lineStyle: { color: d.plan.color, type: 'dashed', width: 1.5 }, itemStyle: { color: d.plan.color } });
     recurringKeys.forEach((k, ki) => {
       if (!seriesHasData(d.cashInByKey[k])) return; // no clutter for a component that's zero everywhere on this plan
+      // CI-family terminal double-count fix (2026-09-08, per user): for CISC/CIPC/CISCP,
+      // cash_coupon's last-year value IS the same final cash-in that's already folded into
+      // d.terminal's max(SA, CV, cum_premium) above -- stacking both would show the customer
+      // receiving that payout twice. Zero out only the terminal-year entry so cash_coupon
+      // still stacks normally for any real interim-year payouts before maturity.
+      let data = d.cashInByKey[k];
+      if (d.isCiFamily && k === 'cash_coupon' && data[lastIdx]) {
+        data = data.map((v, idx) => idx === lastIdx ? 0 : v);
+      }
       // cv_addon__ keys (Vitality Bonus, now a recurring cash-in, 2026-08-06) aren't in
       // CASH_IN_LABELS_C -- fall back to the owning rider's own display name instead of the
       // raw internal key.
@@ -2998,7 +3102,7 @@ function cashflowChartOption(plans, tick, dark, st) {
         label = owner ? `Vitality Bonus: ${riderLabelFormattedC(owner.name)}` : k;
       }
       series.push({ name: label || k, xAxisIndex: i, yAxisIndex: i, type: 'bar', stack: cfStack,
-        data: d.cashInByKey[k], itemStyle: { color: accents[ki % accents.length] }, barMaxWidth: 28 });
+        data, itemStyle: { color: accents[ki % accents.length] }, barMaxWidth: 28 });
     });
     // Cash-out stack order (redesign 2026-08-05, per user request): RPP touches the zero
     // axis (pushed FIRST), then RTU, ATU, UDR, PPR stack outward in that order. RPP always
@@ -3117,7 +3221,15 @@ function cashflowTooltipTableFormatter(params, plansData) {
   html += '</tbody></table></div>';
   return html;
 }
-function irrChartOption(plans, tick, dark) {
+// opts.compareView (2026-09-08, per user): the Compare tab's own multi-plan IRR chart and
+// the Deep-dive tab's combined cashflow+IRR chart (individualCashflowIrrOption, below) both
+// call this SAME function -- user only wanted the redundant endLabel/last-year-callout
+// removed from the Compare tab's chart, Deep-dive keeps everything as it always has. Gated
+// behind this flag rather than splitting into two functions, since every OTHER piece of
+// logic (shared x-axis union, lane assignment, callout #1/#2) must stay identical between
+// the two views.
+function irrChartOption(plans, tick, dark, opts = {}) {
+  const compareView = !!opts.compareView;
   const cc = creamChartColors(dark);
   const axisColor = cc.axis;
   const gridColor = cc.grid;
@@ -3268,15 +3380,25 @@ function irrChartOption(plans, tick, dark) {
     } else {
       const lineSeries = { name: t.short, type: 'line', data, symbol: 'circle', symbolSize: 5, smooth: true,
         lineStyle: { color: p.color, width: 2.5, type: t.dash === 'dashed' ? 'dashed' : 'solid' }, itemStyle: { color: p.color }, connectNulls: true,
-        endLabel: { show: true, formatter: () => t.short, color: p.color, fontWeight: 600, fontSize: 11, fontFamily: FONT, distance: 8 },
         labelLayout: { moveOverlap: 'shiftY', hideOverlap: true } };
+      // 2026-09-08, per user, Compare tab only (see opts.compareView note at the top of this
+      // function): the endLabel ("IRR CV"/"IRR DB" text at the line's right end) just
+      // restates what the tooltip already shows on hover. Deep-dive keeps it exactly as
+      // before -- untouched here, not merely re-added, so its behavior can't drift from this
+      // gate later.
+      if (!compareView) {
+        lineSeries.endLabel = { show: true, formatter: () => t.short, color: p.color, fontWeight: 600, fontSize: 11, fontFamily: FONT, distance: 8 };
+      }
       const markPointData = [];
       // Value annotation (§7.11 item 4/5): plan-specific IRR CV/DB reading, border
       // colored by rule above -- collected into markPointData below so it can share
       // one markPoint config with the existing footnote callouts (still dodges via
       // labelLayout on the whole series, so it never sits on top of its own line).
-      const isDbAnnotate = t.key === 'irr_death' && p.name === dbAnnotatePlanName;
-      const isCvAnnotate = t.key === 'irr_surrender' && p.name === cvAnnotatePlanName;
+      // 2026-09-08, per user, Compare tab only: same reasoning as endLabel above -- this
+      // box just restates a tooltip-visible value. `!compareView &&` is the ONLY change to
+      // this condition; every branch below is unchanged from Deep-dive's original behavior.
+      const isDbAnnotate = !compareView && t.key === 'irr_death' && p.name === dbAnnotatePlanName;
+      const isCvAnnotate = !compareView && t.key === 'irr_surrender' && p.name === cvAnnotatePlanName;
       if (isDbAnnotate || isCvAnnotate) {
         const idxLast = (() => { for (let i = sd.raws.length - 1; i >= 0; i--) { if (sd.raws[i] !== null && sd.raws[i] !== undefined) return i; } return -1; })();
         if (idxLast >= 0) {
@@ -3289,7 +3411,12 @@ function irrChartOption(plans, tick, dark) {
             label: {
               show: true, formatter: `${t.short} ${p.name}: ${(raw*100).toFixed(2)}%`,
               backgroundColor: dark ? '#1B2027' : '#FFFFFF', borderColor: p.color, borderWidth: 1.5, borderRadius: 6,
-              padding: [4, 8], color: p.color, fontSize: 10, fontFamily: FONT, fontWeight: 600,
+              // 2026-09-08, per user: text color matched to the cashflow chart's terminal
+              // callout box (dashboard.js buildCashflowSeriesBreakdownJS caller, cvLabel
+              // markPoint) -- a neutral dark/light text reads far better against the white/
+              // dark background than the plan's own accent color did, which was often too
+              // low-contrast (e.g. a light pink plan color on a white box).
+              padding: [4, 8], color: dark ? '#E5E0D8' : '#2B2620', fontSize: 10, fontFamily: FONT, fontWeight: 600,
               position: raw >= 0 ? 'top' : 'bottom', distance: 10, lineHeight: 14,
             },
           });
@@ -3357,7 +3484,11 @@ function irrChartOption(plans, tick, dark) {
     // with more simultaneous out-of-range series need more headroom than a single-lane case
     // (fixed 2026-08-05, spotted via screenshot -- second occurrence after the first top:64
     // fix wasn't enough for a multi-lane case).
-    grid: { left: 50, right: 84, top: 100, bottom: 60 },
+    // right: 84 in Deep-dive (unchanged, still needs standoff room for its endLabel/
+    // value-annotation box); 20 in Compare (2026-09-08, per user) -- neither element exists
+    // there anymore, so the plot can use the freed width. 20 is just typical edge padding
+    // used elsewhere in this file, not tied to any remaining label.
+    grid: { left: 50, right: compareView ? 20 : 84, top: 100, bottom: 60 },
     tooltip: { trigger: 'axis', formatter: p => axisTooltipFormatter(p.filter(x => x.seriesName !== '__zone'), v => v===null||v===undefined ? '-' : (v*100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})+'%', { icons, seriesOnly: false, yearLookup: (gridIdx, dataIdx) => years[dataIdx] || '' }), axisPointer: axisPointerCross(dark), ...tooltipStyle(dark) },
     legend: { bottom: 4, textStyle: { color: axisColor, fontSize: 11, fontFamily: FONT }, data: typeDefs.map(t => t.short) },
     dataZoom: [{ type: 'inside' }],
@@ -4666,7 +4797,7 @@ function render() {
     let compareIrrInst = null;
     if (irrEl) {
       compareIrrInst = echarts.init(irrEl);
-      compareIrrInst.setOption(irrChartOption(visiblePlans, effTick, dark));
+      compareIrrInst.setOption(irrChartOption(visiblePlans, effTick, dark, { compareView: true }));
       echartsInstances.push(compareIrrInst);
     }
     // One multi-grid cashflow chart covering all visible plans side-by-side (redesign
