@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Wealth Max vs Issara Plus</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f6f3ec;
+  --surface:#ffffff;
+  --tile:#fbfaf6;
+  --line:#e4dfd2;
+  --line-strong:#d8d2c0;
+  --ink:#23271f;
+  --ink-2:#8a8d82;
+  --gold:#c9982b;
+  --gold-soft:#f5b942;
+  --teal:#2f6b5e;
+  --rust:#b6572f;
+  --tint:#ede7d8;
+  --tint-2:#e4eae6;
+  --tint-rust:#f4e6dc;
+  --brand:#df0843;
+  --brand-deep:#af0635;
+  --brand-tint:#fce6ec;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#12151a; --surface:#1b2027; --tile:#20262e;
+    --line:#2b323b; --line-strong:#3a424c;
+    --ink:#e7e5dd; --ink-2:#9aa0a6;
+    --gold:#f5b942; --gold-soft:#c99a3e;
+    --teal:#5fb3a3; --rust:#d98e5a;
+    --tint:#262117; --tint-2:#1a2420; --tint-rust:#2a2019;
+    --brand:#ff5c80; --brand-deep:#d31145; --brand-tint:#2a1219;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#12151a; --surface:#1b2027; --tile:#20262e;
+  --line:#2b323b; --line-strong:#3a424c;
+  --ink:#e7e5dd; --ink-2:#9aa0a6;
+  --gold:#f5b942; --gold-soft:#c99a3e;
+  --teal:#5fb3a3; --rust:#d98e5a;
+  --tint:#262117; --tint-2:#1a2420; --tint-rust:#2a2019;
+  --brand:#ff5c80; --brand-deep:#d31145; --brand-tint:#2a1219;
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"IBM Plex Sans Thai",sans-serif;
+  font-size:16px;
+  line-height:1.7;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{font-family:"Prompt",sans-serif;font-weight:500;margin:0;text-wrap:balance;line-height:1.35;}
+.shell{max-width:920px;margin:0 auto;padding:0 20px;}
+
+/* ---------- Meta row ---------- */
+.meta-row{
+  padding:22px 0 0;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  font-family:"Prompt",sans-serif;font-size:.8rem;color:var(--ink-2);
+}
+.meta-row .k{letter-spacing:.03em;}
+.meta-row .dot{opacity:.5;}
+.meta-row .v{color:var(--ink);font-weight:500;}
+
+/* ---------- Hero ---------- */
+.hero{padding:18px 0 8px;}
+.hero h1{
+  font-size:clamp(26px,4.6vw,34px);
+  font-weight:600;
+  margin-top:8px;
+}
+.hero h1 .accent{
+  display:block;
+  height:4px;width:56px;
+  background:var(--brand);
+  border-radius:2px;
+  margin-bottom:14px;
+}
+.hero p{
+  margin-top:12px;
+  max-width:56ch;
+  color:var(--ink-2);
+  font-size:1rem;
+}
+
+/* ---------- Product tiles ---------- */
+.tiles{
+  display:grid;grid-template-columns:1fr 1fr;gap:16px;
+  margin-top:28px;
+}
+@media (max-width:640px){.tiles{grid-template-columns:1fr;}}
+.tile{
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:22px;
+}
+.tile .stripe{
+  height:3px;width:36px;border-radius:2px;margin-bottom:14px;
+}
+.tile.wm .stripe{background:var(--teal);}
+.tile.isp .stripe{background:var(--rust);}
+.tile h2{font-size:1.25rem;font-weight:600;}
+.tile .sub{color:var(--ink-2);font-size:.86rem;margin-top:3px;}
+.kv{
+  display:flex;justify-content:space-between;gap:14px;
+  padding:11px 0;border-top:1px solid var(--line);
+  font-size:.88rem;
+}
+.kv:first-of-type{margin-top:16px;}
+.kv .k{color:var(--ink-2);}
+.kv .v{font-weight:600;font-variant-numeric:tabular-nums;text-align:right;font-family:"Prompt",sans-serif;}
+.tile.wm .kv .v{color:var(--teal);}
+.tile.isp .kv .v{color:var(--rust);}
+
+/* ---------- Sections ---------- */
+.section{padding:44px 0 0;}
+.sec-head{margin-bottom:18px;}
+.sec-head .eyebrow{
+  font-family:"Prompt",sans-serif;font-weight:600;font-size:.78rem;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--gold);
+}
+.sec-head h2{font-size:1.35rem;margin-top:5px;}
+.sec-head p.answer{color:var(--ink-2);margin-top:6px;font-size:.94rem;}
+
+/* ---------- Table (matches site's .tbl pattern) ---------- */
+.table-wrap{
+  overflow-x:auto;
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:14px;
+}
+.tbl{border-collapse:collapse;width:100%;min-width:620px;font-size:.9rem;}
+.tbl thead th{
+  text-align:left;font-weight:500;font-family:"Prompt",sans-serif;
+  color:var(--ink-2);font-size:.78rem;letter-spacing:.03em;
+  padding:14px 16px;background:var(--tile);
+}
+.tbl thead th:first-child{border-top-left-radius:14px;}
+.tbl thead th:last-child{border-top-right-radius:14px;}
+.tbl tbody th{
+  text-align:left;font-weight:500;font-family:"Prompt",sans-serif;
+  padding:14px 16px;color:var(--ink-2);font-size:.82rem;width:150px;
+}
+.tbl tbody td{padding:14px 16px;border-top:1px solid var(--line);}
+.tbl tbody tr:first-child td, .tbl tbody tr:first-child th{border-top:1px solid var(--line);}
+
+/* ---------- Emphasis ----------
+   สีเน้นผูกกับ "ของใคร" ไม่ใช่ "ดี/ไม่ดี":
+   .em-wm = ข้อมูลเฉพาะ Wealth Max (--teal) · .em-isp = ข้อมูลเฉพาะ Issara Plus (--rust)
+   .em-same = ประเด็นที่สองแผนเหมือนกัน ใช้สีตัวอักษรปกติ ไม่แต้มสีฝั่งใดฝั่งหนึ่ง
+   ทุกคลาสเพิ่มน้ำหนักตัวอักษรด้วย เพื่อไม่ให้สีเป็นตัวสื่อความหมายเพียงอย่างเดียว (WCAG 1.4.1)
+   ไม่ใช้ --brand เป็นสีเน้นเนื้อหา ตามกติกา AIA-112 */
+.em-wm{color:var(--teal);font-weight:600;}
+.em-isp{color:var(--rust);font-weight:600;}
+.em-same{color:var(--ink);font-weight:600;}
+
+/* ---------- Fit cards ---------- */
+.fit-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+@media (max-width:640px){.fit-grid{grid-template-columns:1fr;}}
+.fit-card{
+  border-radius:14px;padding:20px;border:1px solid var(--line);
+}
+.fit-card.wm{background:var(--tint-2);}
+.fit-card.isp{background:var(--tint-rust);}
+.fit-card h3{font-size:1rem;font-weight:600;}
+.fit-card p{font-size:.9rem;color:var(--ink-2);margin:8px 0 0;}
+
+/* ---------- CTA ---------- */
+.cta-row{margin-top:32px;display:flex;gap:10px;flex-wrap:wrap;}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  background:var(--brand);color:#fff;
+  padding:12px 22px;border-radius:8px;
+  font-family:"Prompt",sans-serif;font-weight:500;font-size:.92rem;
+  text-decoration:none;
+}
+.btn-ghost{
+  display:inline-flex;align-items:center;gap:8px;
+  border:1px solid var(--line-strong);color:var(--ink);
+  padding:12px 22px;border-radius:8px;
+  font-family:"Prompt",sans-serif;font-weight:500;font-size:.92rem;
+  text-decoration:none;
+}
+
+.foot{height:56px;}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="meta-row">
+    <span class="k">แผนสะสมทรัพย์</span>
+    <span class="dot">·</span>
+    <span class="v">AIA Wealth Max</span>
+    <span class="dot">·</span>
+    <span class="v">AIA Issara Plus</span>
+  </div>
+
+  <div class="hero">
+    <h1><span class="accent"></span>เลือกแผนสะสมทรัพย์ที่ใช่สำหรับคุณ</h1>
+    <p>สองแผนยูนิต ลิงค์ เน้นสะสมทรัพย์ระยะยาว โครงสร้างโบนัสและความยืดหยุ่นต่างกัน เทียบให้เห็นชัดก่อนตัดสินใจ</p>
+  </div>
+
+  <div class="tiles">
+    <div class="tile wm">
+      <div class="stripe"></div>
+      <span class="sub">นิ่ง · วินัยระยะยาว</span>
+      <h2>AIA Wealth Max</h2>
+      <div class="kv"><span class="k">เบี้ยขั้นต่ำ</span><span class="v">300,000 บาท/ปี</span></div>
+      <div class="kv"><span class="k">โบนัสก้อนใหญ่</span><span class="v">150% ของเบี้ยปีแรก</span></div>
+      <div class="kv"><span class="k">โบนัสสะสม</span><span class="v">2%/ปี ตั้งแต่ปีที่ 10</span></div>
+      <div class="kv"><span class="k">ความคุ้มครองต่อเนื่อง</span><span class="v">รับประกัน 10 ปี</span></div>
+    </div>
+    <div class="tile isp">
+      <div class="stripe"></div>
+      <span class="sub">ยืดหยุ่น · ปรับได้</span>
+      <h2>AIA Issara Plus</h2>
+      <div class="kv"><span class="k">เบี้ยขั้นต่ำ</span><span class="v">12,000 บาท/ปี</span></div>
+      <div class="kv"><span class="k">โบนัสสะสม</span><span class="v">0.45%/ปี หลังอายุ 55</span></div>
+      <div class="kv"><span class="k">AIA Vitality</span><span class="v">คืนสูงสุด 20%</span></div>
+      <div class="kv"><span class="k">พักชำระเบี้ย</span><span class="v">ได้หลังปีที่ 3</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="sec-head">
+      <div class="eyebrow">เทียบทีละมิติ</div>
+      <h2>อะไรที่ต่างกันจริงๆ</h2>
+      <p class="answer">ตัวเลขและเงื่อนไขสำคัญที่ควรรู้ก่อนเลือก</p>
+    </div>
+    <div class="table-wrap">
+      <table class="tbl">
+        <thead>
+          <tr><th>มิติ</th><th>Wealth Max</th><th>Issara Plus</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>โบนัสก้อนใหญ่</th>
+            <td>Power Up Bonus <span class="em-wm">150% ของเบี้ยปีแรก</span> จ่ายครั้งเดียวใน<span class="em-wm">ปีกรมธรรม์ที่ 20</span> เมื่อจ่ายเบี้ยครบทุกงวดต่อเนื่องโดยไม่เคยลดเบี้ยหรือถอนเงินระหว่างทาง</td>
+            <td>ไม่มีโบนัสก้อนใหญ่แบบนี้</td>
+          </tr>
+          <tr>
+            <th>โบนัสสะสม</th>
+            <td><span class="em-wm">2% ของเบี้ยหลัก</span> จ่ายทุกครั้งที่ชำระเบี้ยตั้งแต่<span class="em-wm">ปีกรมธรรม์ที่ 10</span> เป็นต้นไป โดยต้องไม่เคยลดเบี้ยหรือถอนเงิน</td>
+            <td><span class="em-isp">0.45% ต่อปี</span>ของมูลค่าหน่วยลงทุน จ่ายเป็นรายเดือน เริ่มรับเมื่อ<span class="em-isp">อายุครบ 55 ปี</span> กรมธรรม์มีผลบังคับ 10 ปี และจ่ายเบี้ยมาแล้ว 10 ปี</td>
+          </tr>
+          <tr>
+            <th>ความยืดหยุ่นระหว่างทาง</th>
+            <td>ถอนเงินหรือลดเบี้ยแม้ครั้งเดียว <span class="em-wm">เสียสิทธิ์โบนัสทั้งหมดทันที</span></td>
+            <td>ปรับทุนหรือถอนเงินได้โดย<span class="em-isp">ไม่ผูกกับสิทธิ์โบนัสสะสม</span></td>
+          </tr>
+          <tr>
+            <th>ความคุ้มครองต่อเนื่อง</th>
+            <td>รับประกันความคุ้มครองต่อเนื่อง <span class="em-same">10 ปี</span> แม้มูลค่าการลงทุนจะผันผวน</td>
+            <td>รับประกันความคุ้มครองต่อเนื่อง <span class="em-same">10 ปี</span> ภายใต้เงื่อนไขกรมธรรม์</td>
+          </tr>
+          <tr>
+            <th>AIA Vitality</th>
+            <td>ไม่ร่วมโครงการ</td>
+            <td>คืนค่าการประกันภัยปีแรก <span class="em-isp">10%</span> ปีต่ออายุ<span class="em-isp">สูงสุด 20%</span> ตามสถานะสุขภาพ</td>
+          </tr>
+          <tr>
+            <th>พักชำระเบี้ย</th>
+            <td>ไม่มีตัวเลือกนี้</td>
+            <td>พักชำระเบี้ยได้<span class="em-isp">หลังกรมธรรม์ครบ 3 ปี</span></td>
+          </tr>
+          <tr>
+            <th>ถอนเงินก่อนกำหนด</th>
+            <td><span class="em-same">ปีที่ 1-2 หักค่าธรรมเนียม 50%</span> ของมูลค่าที่ถอน <span class="em-same">ตั้งแต่ปีที่ 3 ไม่หักค่าธรรมเนียม</span> (เมื่อจ่ายเบี้ยครบตามงวด)</td>
+            <td><span class="em-same">เงื่อนไขเดียวกัน</span>: ปีที่ 1-2 หัก 50% ตั้งแต่ปีที่ 3 ไม่หักค่าธรรมเนียม</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="sec-head">
+      <div class="eyebrow">สรุปให้เลือกง่ายขึ้น</div>
+      <h2>เหมาะกับใคร</h2>
+    </div>
+    <div class="fit-grid">
+      <div class="fit-card wm">
+        <h3>AIA Wealth Max เหมาะกับคุณถ้า...</h3>
+        <p>มั่นใจว่าจะจ่ายเบี้ยต่อเนื่องได้ยาวถึง <span class="em-same">20 ปี</span>โดย<span class="em-same">ไม่ต้องแตะเงินก้อนนี้เลย</span> และอยากได้โบนัสก้อนใหญ่เป็นเป้าหมายปลายทาง</p>
+      </div>
+      <div class="fit-card isp">
+        <h3>AIA Issara Plus เหมาะกับคุณถ้า...</h3>
+        <p>อยากเริ่มต้นด้วย<span class="em-same">เบี้ยที่เบากว่า</span> ต้องการความยืดหยุ่นเผื่อแผนชีวิตเปลี่ยน และอยากได้สิทธิ์ <span class="em-same">AIA Vitality</span> ช่วยลดต้นทุนระหว่างทาง</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot"></div>
+</div>
+</body>
+</html>
