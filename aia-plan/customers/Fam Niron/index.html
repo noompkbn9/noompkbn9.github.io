@@ -3859,18 +3859,25 @@ function computeBenefitPlanData(c, st, p) {
     const activeRow = series.slice().reverse().find(row => (row[r.row_key] || 0) !== 0) || series[series.length - 1];
     return Math.abs(activeRow[r.row_key] || 0);
   };
-  const riderLine = (name, type, valueText) => {
+  // note param (2026-09-13, per user): a rider's ci_note ("this premium buys a
+  // contingent/waiver benefit, not a DB/CV number") previously only ever surfaced as a
+  // tooltip on the Cash Flow/IRR tab's rider toggle chip -- Benefit Summary itself showed
+  // just "ชื่อ (ประเภท): เบี้ย/ปี" with no explanation, so a rider like AIA PBCI (a premium
+  // waiver, not a DB/CV/CI addon) looked like a cost with no benefit at all. Appended as a
+  // muted line under the premium instead of only living on a different tab's chip.
+  const riderLine = (name, type, valueText, note) => {
     const stripped = stripRiderName(name);
     const fullName = riderFullNameC(stripped);
     const excludedNote = excludedPprNames.has(name) ? ` <span class="muted" style="font-style:italic;">(ไม่รวมในการคำนวณ)</span>` : '';
-    return `<div${excludedPprNames.has(name) ? ' style="opacity:.55;"' : ''}${fullName ? ` title="${fullName}"` : ''}>${riderLabelFormattedC(name)} (${type}): ${valueText}${excludedNote}</div>`;
+    const noteHtml = note ? `<div class="muted" style="font-style:italic;font-size:11px;">${note}</div>` : '';
+    return `<div${excludedPprNames.has(name) ? ' style="opacity:.55;"' : ''}${fullName ? ` title="${fullName}"` : ''}>${riderLabelFormattedC(name)} (${type}): ${valueText}${excludedNote}${noteHtml}</div>`;
   };
   const attachedNames = new Set(attachedRiders.map(r => r.name));
   const bundledOnlyRiders = (p.benefit_riders || []).filter(br => !attachedNames.has(br.name));
   const riderRowsHtml = attachedRiders.map(r =>
-    riderLine(r.name, r.type, `${fmtBaht(riderPremiumNow(r))} บาท/ปี`)
+    riderLine(r.name, r.type, `${fmtBaht(riderPremiumNow(r))} บาท/ปี`, r.ci_note)
   ).concat(bundledOnlyRiders.map(br =>
-    riderLine(br.name, br.type || 'UDR', 'รวมอยู่ในค่าธรรมเนียมกรมธรรม์แล้ว (ไม่มีเบี้ยแยก)')
+    riderLine(br.name, br.type || 'UDR', 'รวมอยู่ในค่าธรรมเนียมกรมธรรม์แล้ว (ไม่มีเบี้ยแยก)', br.ci_note)
   )).join('');
   const matrix = p.benefit_category_matrix || { rows: [], missing: [] };
   const hasVul = series.some(row => (row.vitality_cashback || 0) > 0);
@@ -4022,11 +4029,16 @@ function renderBenefitSummaryC(c, st, dark, opts) {
       const activeRow = series.slice().reverse().find(row => (row[r.row_key] || 0) !== 0) || series[series.length - 1];
       return Math.abs(activeRow[r.row_key] || 0);
     };
-    const riderLine = (name, type, valueText, fullNameOverride) => {
+    // note param (2026-09-13): same fix as computeBenefitPlanData's riderLine -- a
+    // rider's ci_note previously only showed as a tooltip on the Cash Flow/IRR tab's
+    // toggle chip, so a premium-waiver-type rider (e.g. AIA PBCI) looked like a cost
+    // with no benefit at all in this Benefit Summary listing.
+    const riderLine = (name, type, valueText, fullNameOverride, note) => {
       const stripped = stripRiderName(name);
       const fullName = fullNameOverride !== undefined ? fullNameOverride : riderFullNameC(stripped);
       const excludedNote = excludedPprNames.has(name) ? ` <span class="muted" style="font-style:italic;">(ไม่รวมในการคำนวณ)</span>` : '';
-      return `<div${excludedPprNames.has(name) ? ' style="opacity:.55;"' : ''}${fullName ? ` title="${fullName}"` : ''}>${riderLabelFormattedC(name)} (${type}): ${valueText}${excludedNote}</div>`;
+      const noteHtml = note ? `<div class="muted" style="font-style:italic;font-size:11px;">${note}</div>` : '';
+      return `<div${excludedPprNames.has(name) ? ' style="opacity:.55;"' : ''}${fullName ? ` title="${fullName}"` : ''}>${riderLabelFormattedC(name)} (${type}): ${valueText}${excludedNote}${noteHtml}</div>`;
     };
     const attachedNames = new Set(attachedRiders.map(r => r.name));
     // Every rider is listed here, not just ones with their own premium row -- riders that
@@ -4036,9 +4048,9 @@ function renderBenefitSummaryC(c, st, dark, opts) {
     // from this list before, same gap as the filter-bar rider chips).
     const bundledOnlyRiders = (p.benefit_riders || []).filter(br => !attachedNames.has(br.name));
     const riderRowsHtml = attachedRiders.map(r =>
-      riderLine(r.name, r.type, `${fmtBaht(riderPremiumNow(r))} บาท/ปี`)
+      riderLine(r.name, r.type, `${fmtBaht(riderPremiumNow(r))} บาท/ปี`, undefined, r.ci_note)
     ).concat(bundledOnlyRiders.map(br =>
-      riderLine(br.name, br.type || 'UDR', 'รวมอยู่ในค่าธรรมเนียมกรมธรรม์แล้ว (ไม่มีเบี้ยแยก)')
+      riderLine(br.name, br.type || 'UDR', 'รวมอยู่ในค่าธรรมเนียมกรมธรรม์แล้ว (ไม่มีเบี้ยแยก)', undefined, br.ci_note)
     )).join('');
 
     const stripeBg = i => i % 2 ? 'var(--cream-tile-bg)' : 'transparent';
